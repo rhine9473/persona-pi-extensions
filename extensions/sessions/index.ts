@@ -1006,11 +1006,11 @@ async function showSessionPicker(
                 ["t", toolsExpanded ? "compact" : "tools"],
                 ["h", thinkingVisible ? "hide thinking" : "thinking"],
                 [
-                  "opt+w/ctrl+t",
+                  "ctrl+t",
                   showAllWorkspaces ? "current workspace" : "all workspaces",
                 ],
                 [
-                  "opt+s/ctrl+b",
+                  "ctrl+b",
                   showSubagents ? "hide subagents" : "show subagents",
                 ],
                 ["ctrl+d", "delete"],
