@@ -1,4 +1,5 @@
 // Adapted from pi-agent-extensions (MIT); see THIRD_PARTY_NOTICES.md.
+import { unlink } from "node:fs/promises";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
@@ -605,6 +606,7 @@ async function showSessionPicker(
       let focus: "list" | "preview" = "list";
       let showAllWorkspaces = false;
       let showSubagents = false;
+      let confirmingDeletePath: string | null = null;
       let isLoading = false;
 
       const cancelPreviewLoad = () => {
@@ -760,15 +762,21 @@ async function showSessionPicker(
         current: typeof entries,
         listWidth: number,
       ): SelectItem[] =>
-        current.map((entry) => ({
-          value: entry.session.path,
-          label: formatItemLabel(
+        current.map((entry) => {
+          const isDeleting = confirmingDeletePath === entry.session.path;
+          const label = formatItemLabel(
             entry.session,
-            listWidth,
+            isDeleting ? Math.max(10, listWidth - 9) : listWidth,
             theme,
             statsLoader.get(entry.session),
-          ),
-        }));
+          );
+          return {
+            value: entry.session.path,
+            label: isDeleting
+              ? theme.fg("error", theme.bold("[Delete?] ")) + label
+              : label,
+          };
+        });
 
       const rebuild = () => {
         filteredEntries = filterSessionEntries(entries, filter);
@@ -980,29 +988,36 @@ async function showSessionPicker(
         // the same row and lost the keys in a wall of dim text.
         const hints = hintLine(
           theme,
-          [
-            renderedPreview.maxScroll > 0
-              ? ([
-                  "",
-                  `${previewScrollOffset + 1}-${Math.min(previewScrollOffset + contentHeight, renderedPreview.totalLines)}/${renderedPreview.totalLines}`,
-                ] as const)
-              : undefined,
-            renderedPreview.maxScroll > 0
-              ? (["pgup/pgdn", "scroll"] as const)
-              : undefined,
-            ["t", toolsExpanded ? "compact" : "tools"],
-            ["h", thinkingVisible ? "hide thinking" : "thinking"],
-            [
-              "opt+w/ctrl+t",
-              showAllWorkspaces ? "current workspace" : "all workspaces",
-            ],
-            [
-              "opt+s/ctrl+b",
-              showSubagents ? "hide subagents" : "show subagents",
-            ],
-            ["esc", "close"],
-          ],
+          confirmingDeletePath
+            ? [
+                ["enter/y", "confirm delete"],
+                ["esc/n", "cancel"],
+              ]
+            : [
+                renderedPreview.maxScroll > 0
+                  ? ([
+                      "",
+                      `${previewScrollOffset + 1}-${Math.min(previewScrollOffset + contentHeight, renderedPreview.totalLines)}/${renderedPreview.totalLines}`,
+                    ] as const)
+                  : undefined,
+                renderedPreview.maxScroll > 0
+                  ? (["pgup/pgdn", "scroll"] as const)
+                  : undefined,
+                ["t", toolsExpanded ? "compact" : "tools"],
+                ["h", thinkingVisible ? "hide thinking" : "thinking"],
+                [
+                  "opt+w/ctrl+t",
+                  showAllWorkspaces ? "current workspace" : "all workspaces",
+                ],
+                [
+                  "opt+s/ctrl+b",
+                  showSubagents ? "hide subagents" : "show subagents",
+                ],
+                ["ctrl+d", "delete"],
+                ["esc", "close"],
+              ],
           width,
+          confirmingDeletePath ? "Delete selected session?" : undefined,
         );
 
         const borderChar = theme.fg("borderMuted", "│");
@@ -1040,6 +1055,35 @@ async function showSessionPicker(
         },
         dispose: disposePicker,
         handleInput: (data) => {
+          if (confirmingDeletePath !== null) {
+            const targetPath = confirmingDeletePath;
+            if (matchesKey(data, Key.enter) || data === "y" || data === "Y") {
+              confirmingDeletePath = null;
+              void (async () => {
+                try {
+                  await unlink(targetPath);
+                  sorted = sorted.filter((s) => s.path !== targetPath);
+                  entries = buildSessionSearchEntries(sorted);
+                  sessionByPath.delete(targetPath);
+                  rebuild();
+                  schedulePreviewLoad();
+                  ctx.ui.notify("Session deleted.", "info");
+                } catch (e) {
+                  const msg = e instanceof Error ? e.message : String(e);
+                  ctx.ui.notify(`Failed to delete session: ${msg}`, "error");
+                }
+                tui.requestRender();
+              })();
+              return;
+            }
+            if (matchesKey(data, Key.escape) || data === "n" || data === "N") {
+              confirmingDeletePath = null;
+              tui.requestRender();
+              return;
+            }
+            return;
+          }
+
           const currentLayout = getSessionPaneLayout(
             tui.terminal?.columns ?? 80,
           );
@@ -1145,6 +1189,18 @@ async function showSessionPicker(
           }
 
           if (focus === "list") {
+            if (matchesKey(data, Key.ctrl("d")) || data === "\u0004") {
+              if (!selectedPath) return;
+              const currentSessionFile = ctx.sessionManager.getSessionFile?.();
+              if (currentSessionFile && selectedPath === currentSessionFile) {
+                ctx.ui.notify("Cannot delete the currently active session.", "warning");
+                return;
+              }
+              confirmingDeletePath = selectedPath;
+              tui.requestRender();
+              return;
+            }
+
             if (isPrintable(data)) {
               filter += data;
               rebuild();
