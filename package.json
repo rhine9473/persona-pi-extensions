@@ -2,6 +2,7 @@
   "name": "persona-pi-extensions",
   "version": "1.0.0",
   "description": "Personal Pi extensions suite by Rhine",
+  "license": "MIT",
   "keywords": [
     "pi-package"
   ],
