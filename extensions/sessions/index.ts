@@ -786,7 +786,7 @@ async function showSessionPicker(
       const renderFilter = (width: number) => {
         const border = (text: string) =>
           theme.fg(focus === "list" ? "accent" : "borderMuted", text);
-        const prefix = "⌕ [ ";
+        const prefix = " ⌕ [ ";
         const suffix = " ]";
         const value = truncateToWidth(
           filter || "type to filter",
@@ -910,10 +910,11 @@ async function showSessionPicker(
 
       const renderSplitPane = (width: number): string[] => {
         const layout = getSessionPaneLayout(width);
+        const innerListWidth = Math.max(10, layout.listWidth - 1);
         const termRows = Math.max(12, tui.terminal?.rows ?? 24);
         // Frame (2) + hint line (1).
         const contentHeight = Math.max(8, termRows - 3);
-        const filterRows = renderFilter(layout.listWidth);
+        const filterRows = renderFilter(innerListWidth);
         const listHeight = Math.max(1, contentHeight - filterRows.length);
 
         let leftLines: string[] = [];
@@ -931,7 +932,7 @@ async function showSessionPicker(
             ),
           );
           ensureStatsWindowLoad(effectiveVisible);
-          const items = buildItems(filteredEntries, layout.listWidth);
+          const items = buildItems(filteredEntries, innerListWidth);
           selectList = new SelectList(items, effectiveVisible, {
             selectedPrefix: (text) =>
               theme.fg(focus === "list" ? "accent" : "muted", text),
@@ -952,7 +953,7 @@ async function showSessionPicker(
 
           leftLines = [
             ...filterRows,
-            ...selectList.render(layout.listWidth),
+            ...selectList.render(innerListWidth),
           ].slice(0, contentHeight);
         }
 
@@ -996,7 +997,7 @@ async function showSessionPicker(
               showAllWorkspaces ? "current workspace" : "all workspaces",
             ],
             [
-              "opt+s/ctrl+s",
+              "opt+s/ctrl+b",
               showSubagents ? "hide subagents" : "show subagents",
             ],
             ["esc", "close"],
@@ -1004,12 +1005,14 @@ async function showSessionPicker(
           width,
         );
 
+        const borderChar = theme.fg("borderMuted", "│");
+        const dividerChar = theme.fg("borderMuted", " │ ");
         const lines = [buildTopBorder(layout.listWidth, layout.previewWidth)];
         for (let i = 0; i < contentHeight; i++) {
-          const left = padAnsiRight(leftLines[i] ?? "", layout.listWidth);
+          const left = padAnsiRight(leftLines[i] ?? "", innerListWidth);
           const right =
             renderedPreview.lines[i] ?? " ".repeat(layout.previewWidth);
-          lines.push(`${left}${theme.fg("borderMuted", " │ ")}${right}`);
+          lines.push(`${borderChar}${left}${dividerChar}${right}`);
         }
         lines.push(buildBottomBorder(layout.listWidth, layout.previewWidth));
         lines.push(hints);
@@ -1050,7 +1053,7 @@ async function showSessionPicker(
             return;
           }
 
-          if (data === "\u0013" || data === "\u001bs") {
+          if (matchesKey(data, Key.ctrl("b")) || data === "\u001bs") {
             showSubagents = !showSubagents;
             void loadWorkspaceSessions(showAllWorkspaces);
             return;

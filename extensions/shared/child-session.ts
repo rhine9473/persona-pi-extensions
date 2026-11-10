@@ -1,0 +1,1063 @@
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  DefaultPackageManager,
+  DefaultResourceLoader,
+  getAgentDir,
+  type LoadExtensionsResult,
+  type LoadSkillsResult,
+  type PackageSource,
+  ProjectTrustStore,
+  type ResolvedPaths,
+  type SessionShutdownEvent,
+  SettingsManager,
+  type SourceInfo,
+  type ToolInfo,
+} from "@earendil-works/pi-coding-agent";
+import { createPiBuiltinExtensionFactories } from "./pi-builtin-extensions.ts";
+import {
+  OPENPI_OWNER_SOURCE_PATHS,
+  OPENPI_TOOL_SURFACE,
+  type OpenPiToolOwner,
+} from "./tool-surface.ts";
+
+export const CHILD_SHUTDOWN_TIMEOUT_MS = 5_000;
+
+/**
+ * The only package tools a headless child may keep. Read-only discovery tools
+ * are safe for children; every other tool this package registers is parent-only
+ * because it orchestrates work, mutates shared runtime state, drives the parent
+ * UI, or asks the user. This is the allowlist half of a fail-closed boundary:
+ * anything registered by this package and not listed here MUST be excluded, and
+ * `child-session.test.ts` scans the extensions to enforce exactly that — so a
+ * future tool cannot silently leak into children by being forgotten. The scan
+ * covers both inline-named registrations and factory-style ones (e.g.
+ * `registerTool(createEditToolDefinition(...))`); an unrecognized factory
+ * registration fails the guard rather than escaping it.
+ */
+export const CHILD_SAFE_PACKAGE_TOOL_NAMES = [
+  "git_show",
+  "git_diff",
+  "git_log",
+] as const;
+
+/**
+ * Read-only inspection tools a role allowlist may grant a child even when the
+ * parent session does not have them active. Pi's default parent surface is
+ * only read/bash/edit/write, and OpenPI's git_* tools sit behind the /plan
+ * boundary, so without this derivation an explicit role list (or the
+ * plan-mode child list) would collapse to `read` alone. Deriving is safe
+ * because every name here is read-only inspection already inside the
+ * parent's `read` authority — the parent must have `read` active, and each
+ * name still passes the provenance and blocked-package checks.
+ */
+export const CHILD_READ_DERIVED_TOOL_NAMES = [
+  "grep",
+  "find",
+  "ls",
+  ...CHILD_SAFE_PACKAGE_TOOL_NAMES,
+] as const;
+
+/**
+ * OpenPI tool names that no longer exist but may still appear in saved user
+ * configuration (agent-type allowlists, workflow tool lists). They are dropped
+ * silently at the child boundary so a stale entry cannot fail preflight.
+ */
+export const RETIRED_OPENPI_TOOL_NAMES = new Set<string>([
+  "fd",
+  "rg",
+  "runtime_snapshot",
+  "tasks_add",
+  "tasks_update",
+  "tasks_list",
+  "context_pivot",
+  "openpi_load_tools",
+  "subagent_list",
+  "bg_list",
+  "bg_start",
+  "bg_status",
+  "bg_kill",
+  "bg_watch",
+  "get_goal",
+  "create_goal",
+  "update_goal",
+]);
+
+/**
+ * These optional packages are parent-only inside concurrent Pi sessions.
+ * pi-web-access owns shared UI/cache and optional execution/provider authority;
+ * exclude the whole package before import, including renamed tools and commands.
+ * pi-intercom resources are unsafe inside concurrent in-process child sessions.
+ * It stores session identity and optional supervisor bridge metadata in
+ * process.env, which is shared by every Direct/Workflow child in this process.
+ * Loading it in children can therefore cross-wire identities; the parent
+ * extension remains loaded and fully usable.
+ */
+const PARENT_ONLY_PI_PACKAGES = ["pi-intercom", "pi-web-access"];
+
+function manifestNamesParentOnlyPackage(manifestPath: string) {
+  try {
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as unknown;
+    return (
+      typeof manifest === "object" &&
+      manifest !== null &&
+      !Array.isArray(manifest) &&
+      PARENT_ONLY_PI_PACKAGES.includes(
+        String((manifest as Record<string, unknown>).name),
+      )
+    );
+  } catch (error) {
+    throw new Error(
+      `Cannot verify child package identity from ${manifestPath}`,
+      { cause: error },
+    );
+  }
+}
+
+function installedPathNamesParentOnlyPackage(installedPath: string) {
+  try {
+    const stats = statSync(installedPath);
+    if (stats.isDirectory()) {
+      const manifestPath = path.join(installedPath, "package.json");
+      if (existsSync(manifestPath)) {
+        return manifestNamesParentOnlyPackage(manifestPath);
+      }
+      if (PARENT_ONLY_PI_PACKAGES.includes(path.basename(installedPath))) {
+        throw new Error(
+          `Cannot verify child package identity from ${installedPath}`,
+        );
+      }
+      return false;
+    }
+    if (!stats.isFile()) {
+      throw new Error(
+        `Cannot verify child package identity from ${installedPath}`,
+      );
+    }
+
+    let current = path.dirname(installedPath);
+    let hasParentOnlyDirectoryName = false;
+    while (true) {
+      hasParentOnlyDirectoryName ||= PARENT_ONLY_PI_PACKAGES.includes(
+        path.basename(current),
+      );
+      const manifestPath = path.join(current, "package.json");
+      if (existsSync(manifestPath)) {
+        return manifestNamesParentOnlyPackage(manifestPath);
+      }
+      const parent = path.dirname(current);
+      if (parent === current) {
+        if (hasParentOnlyDirectoryName) {
+          throw new Error(
+            `Cannot verify child package identity from ${installedPath}`,
+          );
+        }
+        return false;
+      }
+      current = parent;
+    }
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message.startsWith("Cannot verify child package identity")
+    ) {
+      throw error;
+    }
+    throw new Error(
+      `Cannot verify child package identity from ${installedPath}`,
+      { cause: error },
+    );
+  }
+}
+
+function piMatchesPublishedParentOnlySource(options: {
+  source: string;
+  cwd: string;
+  agentDir: string;
+}) {
+  const settingsManager = SettingsManager.inMemory({
+    packages: [options.source],
+  });
+  const packageManager = new DefaultPackageManager({
+    cwd: options.cwd,
+    agentDir: options.agentDir,
+    settingsManager,
+  });
+  return (
+    packageManager.removeSourceFromSettings("npm:pi-intercom") ||
+    packageManager.removeSourceFromSettings(
+      "git:https://github.com/nicobailon/pi-intercom",
+    ) ||
+    packageManager.removeSourceFromSettings("npm:pi-web-access") ||
+    packageManager.removeSourceFromSettings(
+      "git:https://github.com/nicobailon/pi-web-access",
+    )
+  );
+}
+
+function createParentOnlyPackageMatcher(options: {
+  cwd: string;
+  agentDir: string;
+}) {
+  const sourceMatches = new Map<string, boolean>();
+  const installedPathMatches = new Map<string, boolean>();
+  return (source: string, installedPath?: string) => {
+    let sourceMatch = sourceMatches.get(source);
+    if (sourceMatch === undefined) {
+      sourceMatch = piMatchesPublishedParentOnlySource({
+        source,
+        cwd: options.cwd,
+        agentDir: options.agentDir,
+      });
+      sourceMatches.set(source, sourceMatch);
+    }
+    if (sourceMatch || installedPath === undefined) return sourceMatch;
+
+    const resolvedPath = path.resolve(installedPath);
+    let installedPathMatch = installedPathMatches.get(resolvedPath);
+    if (installedPathMatch === undefined) {
+      installedPathMatch = installedPathNamesParentOnlyPackage(resolvedPath);
+      installedPathMatches.set(resolvedPath, installedPathMatch);
+    }
+    return installedPathMatch;
+  };
+}
+
+/** Use Pi's scoped package identity for both resources and inherited tools.
+ * A local single-file source must be resolved as a file, not as its containing
+ * baseDir: only the file lookup walks up to the owning package manifest.
+ */
+function createBlockedChildPackagePolicy(options: {
+  cwd: string;
+  agentDir: string;
+}) {
+  const packageManager = new DefaultPackageManager({
+    ...options,
+    settingsManager: SettingsManager.inMemory(),
+  });
+  const matches = createParentOnlyPackageMatcher(options);
+  return (sourceInfo: Omit<SourceInfo, "path">) => {
+    if (
+      !sourceInfo ||
+      !sourceInfo.source ||
+      !["package", "top-level"].includes(sourceInfo.origin) ||
+      !["user", "project", "temporary"].includes(sourceInfo.scope)
+    ) {
+      throw new Error(
+        "Cannot verify child package identity: missing source metadata",
+      );
+    }
+    if (sourceInfo.origin !== "package" || sourceInfo.scope === "temporary") {
+      return false;
+    }
+    const installedPath =
+      packageManager.getInstalledPath(sourceInfo.source, sourceInfo.scope) ??
+      sourceInfo.baseDir;
+    // A canonical blocked source can be denied even if it has disappeared.
+    if (matches(sourceInfo.source, installedPath)) return true;
+    if (!installedPath) {
+      throw new Error(
+        `Cannot verify child package identity from ${sourceInfo.source}`,
+      );
+    }
+    return false;
+  };
+}
+
+function packageSourceValue(source: PackageSource) {
+  return typeof source === "string" ? source : source.source;
+}
+
+const CHILD_DISABLED_OPENPI_EXTENSION =
+  "-extensions/git-info/index.ts" as const;
+
+/**
+ * Orchestration skills are parent-only: children get no subagent/workflow
+ * tools (CHILD_EXCLUDED_TOOL_NAMES), so advertising these skills in
+ * `<available_skills>` only costs child context.
+ */
+const CHILD_DISABLED_OPENPI_SKILL_DIRS = ["subagents", "workflows"] as const;
+
+function canonicalExistingPath(value: string) {
+  try {
+    return realpathSync.native(value);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * ENOENT means git-info is truly absent (trimmed fork, partial install):
+ * nothing to exclude. Any other failure (permissions, symlink loops) means we
+ * cannot verify the Git-polling extension is present, so fail closed instead
+ * of running a child with an unverifiable extension.
+ */
+export function resolveGitInfoPathOrThrow(
+  resolve: (value: string) => string = realpathSync.native,
+): string | undefined {
+  try {
+    return resolve(
+      fileURLToPath(new URL("../git-info/index.ts", import.meta.url)),
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+function excludeOpenPiGitInfoExtension(
+  resources: LoadExtensionsResult,
+  resolve: (value: string) => string = realpathSync.native,
+): LoadExtensionsResult {
+  const gitInfoPath = resolveGitInfoPathOrThrow(resolve);
+  // undefined = absent (ENOENT): nothing to exclude. Non-ENOENT failures
+  // throw from resolveGitInfoPathOrThrow and fail child creation upstream.
+  if (gitInfoPath === undefined) return resources;
+  return {
+    ...resources,
+    extensions: resources.extensions.filter(
+      (extension) =>
+        canonicalExistingPath(extension.resolvedPath) !== gitInfoPath,
+    ),
+  };
+}
+
+/**
+ * Same rule as resolveGitInfoPathOrThrow: ENOENT means a skill directory is
+ * truly absent (trimmed fork, partial install); any other failure means we
+ * cannot verify it, so fail closed.
+ */
+export function resolveOrchestrationSkillDirsOrThrow(
+  resolve: (value: string) => string = realpathSync.native,
+): string[] {
+  const dirs: string[] = [];
+  for (const name of CHILD_DISABLED_OPENPI_SKILL_DIRS) {
+    try {
+      dirs.push(
+        resolve(
+          fileURLToPath(new URL(`../../skills/${name}`, import.meta.url)),
+        ),
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+  }
+  return dirs;
+}
+
+function excludeOpenPiOrchestrationSkills(
+  resources: LoadSkillsResult,
+  resolve: (value: string) => string = realpathSync.native,
+): LoadSkillsResult {
+  const orchestrationDirs = new Set(
+    resolveOrchestrationSkillDirsOrThrow(resolve),
+  );
+  if (orchestrationDirs.size === 0) return resources;
+  return {
+    ...resources,
+    skills: resources.skills.filter(
+      (skill) =>
+        !orchestrationDirs.has(canonicalExistingPath(skill.baseDir) ?? ""),
+    ),
+  };
+}
+
+function installedPathNamesOpenPi(installedPath: string) {
+  try {
+    const stats = statSync(installedPath);
+    if (stats.isDirectory()) {
+      const manifestPath = path.join(installedPath, "package.json");
+      if (!existsSync(manifestPath)) return false;
+      const manifest = JSON.parse(
+        readFileSync(manifestPath, "utf8"),
+      ) as unknown;
+      return (
+        typeof manifest === "object" &&
+        manifest !== null &&
+        !Array.isArray(manifest) &&
+        (manifest as Record<string, unknown>).name === "@tt-a1i/openpi"
+      );
+    }
+    let current = stats.isFile() ? path.dirname(installedPath) : undefined;
+    while (current) {
+      const manifestPath = path.join(current, "package.json");
+      if (existsSync(manifestPath)) {
+        const manifest = JSON.parse(
+          readFileSync(manifestPath, "utf8"),
+        ) as unknown;
+        return (
+          typeof manifest === "object" &&
+          manifest !== null &&
+          !Array.isArray(manifest) &&
+          (manifest as Record<string, unknown>).name === "@tt-a1i/openpi"
+        );
+      }
+      const parent = path.dirname(current);
+      if (parent === current) return false;
+      current = parent;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function piMatchesPublishedOpenPiSource(options: {
+  source: string;
+  cwd: string;
+  agentDir: string;
+}) {
+  const settingsManager = SettingsManager.inMemory({
+    packages: [options.source],
+  });
+  const packageManager = new DefaultPackageManager({
+    cwd: options.cwd,
+    agentDir: options.agentDir,
+    settingsManager,
+  });
+  return (
+    packageManager.removeSourceFromSettings("npm:@tt-a1i/openpi") ||
+    packageManager.removeSourceFromSettings(
+      "git:https://github.com/openpi-dev/openpi",
+    ) ||
+    packageManager.removeSourceFromSettings(
+      "git:https://github.com/tt-a1i/openpi",
+    )
+  );
+}
+
+function createOpenPiPackageMatcher(options: {
+  cwd: string;
+  agentDir: string;
+}) {
+  const sourceMatches = new Map<string, boolean>();
+  const installedPathMatches = new Map<string, boolean>();
+  return (source: string, installedPath?: string) => {
+    let sourceMatch = sourceMatches.get(source);
+    if (sourceMatch === undefined) {
+      sourceMatch = piMatchesPublishedOpenPiSource({ source, ...options });
+      sourceMatches.set(source, sourceMatch);
+    }
+    if (sourceMatch || installedPath === undefined) return sourceMatch;
+
+    const resolvedPath = path.resolve(installedPath);
+    let installedPathMatch = installedPathMatches.get(resolvedPath);
+    if (installedPathMatch === undefined) {
+      installedPathMatch = installedPathNamesOpenPi(resolvedPath);
+      installedPathMatches.set(resolvedPath, installedPathMatch);
+    }
+    return installedPathMatch;
+  };
+}
+
+function openPiPackageSources(
+  packageManager: DefaultPackageManager,
+  options: { cwd: string; agentDir: string },
+) {
+  const isOpenPiPackage = createOpenPiPackageMatcher(options);
+  const sources = {
+    user: new Set<string>(),
+    project: new Set<string>(),
+  };
+  for (const configured of packageManager.listConfiguredPackages()) {
+    if (isOpenPiPackage(configured.source, configured.installedPath)) {
+      sources[configured.scope].add(configured.source);
+    }
+  }
+  return sources;
+}
+
+function disablesOpenPiGitInfo(pattern: string) {
+  return (
+    pattern.startsWith("-") &&
+    pattern.slice(1).replace(/^\.\//, "") ===
+      CHILD_DISABLED_OPENPI_EXTENSION.slice(1)
+  );
+}
+
+function disableOpenPiGitInfo(source: PackageSource): PackageSource {
+  if (typeof source !== "string") {
+    if (source.extensions?.length === 0) return source;
+    if (source.autoload === false && source.extensions === undefined) {
+      return source;
+    }
+  }
+  const configured = typeof source === "string" ? { source } : source;
+  const extensions = [...(configured.extensions ?? [])];
+  if (!extensions.some(disablesOpenPiGitInfo)) {
+    extensions.push(CHILD_DISABLED_OPENPI_EXTENSION);
+  }
+  return { ...configured, extensions };
+}
+
+function blockedPackageSources(
+  packageManager: DefaultPackageManager,
+  resolvedPaths: ResolvedPaths,
+  options: { cwd: string; agentDir: string },
+) {
+  const isBlocked = createBlockedChildPackagePolicy(options);
+  const blocked = {
+    user: new Set<string>(),
+    project: new Set<string>(),
+  };
+  // Configured packages can be absent in offline mode. Match their canonical
+  // identity without demanding loaded-tool provenance from an unloaded package.
+  const matches = createParentOnlyPackageMatcher(options);
+  for (const configured of packageManager.listConfiguredPackages()) {
+    if (matches(configured.source, configured.installedPath)) {
+      blocked[configured.scope].add(configured.source);
+    }
+  }
+
+  const resources = [
+    ...resolvedPaths.extensions,
+    ...resolvedPaths.skills,
+    ...resolvedPaths.prompts,
+    ...resolvedPaths.themes,
+  ];
+  for (const resource of resources) {
+    const { metadata } = resource;
+    if (metadata.scope === "temporary" || !isBlocked(metadata)) {
+      continue;
+    }
+    blocked[metadata.scope].add(metadata.source);
+  }
+  return blocked;
+}
+
+function createEphemeralChildSettings(
+  sourceSettings: SettingsManager,
+  blockedSources: { user: Set<string>; project: Set<string> },
+  openPiSources: { user: Set<string>; project: Set<string> },
+  projectTrusted: boolean,
+) {
+  const globalSettings = sourceSettings.getGlobalSettings();
+  const projectSettings = sourceSettings.getProjectSettings();
+  const settingsForScope = (
+    settings: typeof globalSettings,
+    scope: "user" | "project",
+  ) => ({
+    ...settings,
+    packages: settings.packages
+      ?.filter(
+        (source) => !blockedSources[scope].has(packageSourceValue(source)),
+      )
+      .map((source) =>
+        openPiSources[scope].has(packageSourceValue(source))
+          ? disableOpenPiGitInfo(source)
+          : source,
+      ),
+  });
+  const contents = {
+    global: JSON.stringify(settingsForScope(globalSettings, "user")),
+    project: JSON.stringify(settingsForScope(projectSettings, "project")),
+  };
+  const storage: Parameters<typeof SettingsManager.fromStorage>[0] = {
+    withLock(scope, update) {
+      const next = update(contents[scope]);
+      if (next !== undefined) contents[scope] = next;
+    },
+  };
+  return SettingsManager.fromStorage(storage, { projectTrusted });
+}
+
+async function createChildSettingsManager(options: {
+  cwd: string;
+  agentDir: string;
+  projectTrusted: boolean;
+}) {
+  const sourceSettings = SettingsManager.create(options.cwd, options.agentDir, {
+    projectTrusted: options.projectTrusted,
+  });
+  const packageManager = new DefaultPackageManager({
+    cwd: options.cwd,
+    agentDir: options.agentDir,
+    settingsManager: sourceSettings,
+  });
+  const resolvedPaths = await packageManager.resolve(async () => "skip");
+  const blockedSources = blockedPackageSources(packageManager, resolvedPaths, {
+    cwd: options.cwd,
+    agentDir: options.agentDir,
+  });
+  const openPiSources = openPiPackageSources(packageManager, {
+    cwd: options.cwd,
+    agentDir: options.agentDir,
+  });
+
+  return createEphemeralChildSettings(
+    sourceSettings,
+    blockedSources,
+    openPiSources,
+    options.projectTrusted,
+  );
+}
+
+/**
+ * Tools that headless children must not receive. Children run without a UI and
+ * cannot orchestrate, so every parent-only tool this package ships is denied.
+ * Grouped by owning extension; keep in sync with the extensions (guarded by the
+ * drift test in child-session.test.ts).
+ */
+export const CHILD_EXCLUDED_TOOL_NAMES = [
+  // embedded browser — authority belongs to the initiating parent Web tab
+  "openpi_browser",
+  // subagents — children cannot spawn/observe more agents
+  "subagent_spawn",
+  "subagent_wait",
+  "subagent_cancel",
+  "subagent_send",
+  "subagent_check",
+  // workflows — children cannot recursively orchestrate or manage runs
+  "workflow",
+  "workflow_stop",
+  "workflow_status",
+  // ask-user — headless children have no user to ask or handoff to
+  "ask_user",
+  "human_handoff",
+  // plan-mode — completion controls the parent session's write gate and UI
+  "plan_ready",
+  // setup — configuration is a package-owned, parent-only choice
+  "configure_my_pi_setup",
+] as const;
+
+const PARENT_ONLY_OPENPI_EXTENSION_PATHS = new Set(
+  [
+    canonicalExistingPath(
+      fileURLToPath(new URL("../web-search/index.ts", import.meta.url)),
+    ),
+    ...(Object.keys(OPENPI_TOOL_SURFACE) as OpenPiToolOwner[])
+      .filter((owner) => {
+        const { resident, boundary } = OPENPI_TOOL_SURFACE[owner];
+        const toolNames = [...resident, ...boundary];
+        return (
+          toolNames.length > 0 &&
+          toolNames.every((name) =>
+            CHILD_EXCLUDED_TOOL_NAMES.includes(name as never),
+          )
+        );
+      })
+      .map((owner) => canonicalExistingPath(OPENPI_OWNER_SOURCE_PATHS[owner]))
+      .filter(
+        (extensionPath): extensionPath is string => extensionPath !== undefined,
+      ),
+  ].filter(
+    (extensionPath): extensionPath is string => extensionPath !== undefined,
+  ),
+);
+
+function isVerifiedParentOnlyOpenPiExtension(extension: {
+  path: string;
+  resolvedPath: string;
+  sourceInfo: { path: string };
+}) {
+  return [
+    extension.path,
+    extension.resolvedPath,
+    extension.sourceInfo.path,
+  ].some((candidate) => {
+    const canonicalPath = canonicalExistingPath(candidate);
+    return (
+      canonicalPath !== undefined &&
+      PARENT_ONLY_OPENPI_EXTENSION_PATHS.has(canonicalPath)
+    );
+  });
+}
+
+/**
+ * Fresh SDK options avoid turning the denylist into an accidental allowlist.
+ *
+ * `tools` narrows further, for an agent type that fixes a child's capabilities
+ * (see `../subagents/src/agent-types.ts`). It can only ever REMOVE: pi admits a
+ * tool when `(!allowed || allowed.has(name)) && !excluded.has(name)`, so an
+ * allowlist naming an excluded tool still cannot obtain it, and the boundary
+ * above stays authoritative. Omitting `tools` keeps today's behavior.
+ *
+ * Remove parent-only and retired tools before exposing or enforcing a
+ * requested allowlist. Undefined preserves the normal child tool set; an
+ * empty array deliberately means no tools.
+ */
+export function effectiveChildToolAllowlist(tools?: readonly string[]) {
+  return tools?.filter(
+    (tool) =>
+      !CHILD_EXCLUDED_TOOL_NAMES.includes(tool as never) &&
+      !RETIRED_OPENPI_TOOL_NAMES.has(tool),
+  );
+}
+
+/** Project the parent's active surface into a child; a role can only narrow it.
+ * Active tools are a visibility choice, not a filesystem/network sandbox.
+ * Inactive tools are not implicitly activated by delegation — except the
+ * CHILD_READ_DERIVED_TOOL_NAMES subset, which an explicit role list may grant
+ * while the parent holds `read` (they stay within the parent's read authority
+ * and still pass the provenance/blocked checks). Pi supplies the provenance
+ * for every inherited tool; unverifiable identities stop startup.
+ */
+export function inheritedChildToolAllowlist(
+  parentTools: readonly string[],
+  roleTools: readonly string[] | undefined,
+  options: {
+    availableTools: readonly Pick<ToolInfo, "name" | "sourceInfo">[];
+    cwd: string;
+  },
+) {
+  const allowed = roleTools === undefined ? undefined : new Set(roleTools);
+  const available = new Map(
+    options.availableTools.map((tool) => [tool.name, tool]),
+  );
+  const isBlocked = createBlockedChildPackagePolicy({
+    cwd: options.cwd,
+    agentDir: getAgentDir(),
+  });
+  const permitted = (name: string) => {
+    const tool = available.get(name);
+    if (!tool) {
+      throw new Error(
+        `Cannot verify child tool provenance for ${JSON.stringify(name)}`,
+      );
+    }
+    return !isBlocked(tool.sourceInfo);
+  };
+  const parentActive = new Set(
+    effectiveChildToolAllowlist([...new Set(parentTools)]),
+  );
+  const inherited = [...parentActive].filter(
+    (name) => (!allowed || allowed.has(name)) && permitted(name),
+  );
+  if (!allowed || !parentActive.has("read")) return inherited;
+  const readDerived = new Set<string>(CHILD_READ_DERIVED_TOOL_NAMES);
+  const derived = effectiveChildToolAllowlist(
+    [...allowed].filter(
+      (name) => !parentActive.has(name) && readDerived.has(name),
+    ),
+  )!.filter(permitted);
+  return [...inherited, ...derived];
+}
+
+export function childToolPolicy(tools?: readonly string[]) {
+  const effectiveTools = effectiveChildToolAllowlist(tools);
+  return {
+    excludeTools: [...CHILD_EXCLUDED_TOOL_NAMES],
+    ...(effectiveTools ? { tools: effectiveTools } : {}),
+  };
+}
+
+export interface ChildResourceOptions {
+  cwd: string;
+  projectTrusted: boolean;
+  appendSystemPrompt?: string[];
+  agentDir?: string;
+}
+
+/** Load normal global/package resources and trust-gated project resources. */
+export async function createChildResources(options: ChildResourceOptions) {
+  const agentDir = options.agentDir ?? getAgentDir();
+  const settingsManager = await createChildSettingsManager({
+    cwd: options.cwd,
+    agentDir,
+    projectTrusted: options.projectTrusted,
+  });
+  const loader = new DefaultResourceLoader({
+    cwd: options.cwd,
+    agentDir,
+    settingsManager,
+    // A child is an SDK session, so it inherits no built-in registry unless
+    // this loader passes one (see pi-builtin-extensions.ts). Without it
+    // tool_search and codemode are never registered in the child, which is a
+    // capability loss no child-safe activation list can repair.
+    extensionFactories: createPiBuiltinExtensionFactories(),
+    extensionsOverride(base) {
+      const withoutGitInfo = excludeOpenPiGitInfoExtension(base);
+      return {
+        ...withoutGitInfo,
+        extensions: withoutGitInfo.extensions.filter(
+          (extension) => !isVerifiedParentOnlyOpenPiExtension(extension),
+        ),
+      };
+    },
+    skillsOverride: excludeOpenPiOrchestrationSkills,
+    ...(options.appendSystemPrompt
+      ? { appendSystemPrompt: options.appendSystemPrompt }
+      : {}),
+  });
+  await loader.reload();
+  return { loader, settingsManager };
+}
+
+/**
+ * Whether Pi's persisted trust store explicitly trusts this directory (or a
+ * containing one). Unreadable or invalid trust data fails closed.
+ *
+ * Use this when no live trust decision exists yet — notably at extension
+ * registration, which runs before `session_start`.
+ */
+export function isProjectTrustedOnDisk(cwd: string, agentDir?: string) {
+  try {
+    const trustStore = new ProjectTrustStore(agentDir ?? getAgentDir());
+    return trustStore.get(cwd) === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Same-directory children inherit the live parent decision. An alternate cwd
+ * is trusted only when Pi's persisted trust store explicitly trusts it (or a
+ * containing directory); unreadable/invalid trust data fails closed.
+ */
+export function resolveStandaloneChildProjectTrust(options: {
+  parentCwd: string;
+  childCwd: string;
+  parentTrusted: boolean;
+  agentDir?: string;
+}) {
+  if (path.resolve(options.childCwd) === path.resolve(options.parentCwd)) {
+    return options.parentTrusted;
+  }
+  return isProjectTrustedOnDisk(options.childCwd, options.agentDir);
+}
+
+interface ChildSessionStartup {
+  bindExtensions(bindings: { mode: "print" }): Promise<void>;
+  getActiveToolNames?(): string[];
+  getAllTools?(): { name: string }[];
+  setActiveToolsByName?(toolNames: string[]): void;
+}
+
+function boundedToolNames(names: readonly string[]) {
+  const shown = names
+    .slice(0, 8)
+    .map((name) => JSON.stringify(name.slice(0, 128)))
+    .join(", ");
+  return names.length > 8 ? `${shown}, and ${names.length - 8} more` : shown;
+}
+
+/**
+ * Start child extensions, then fail before the first prompt if an explicit
+ * allowlist names a tool that the final bound registry cannot actually expose.
+ * Parent-only names are deliberately ignored here: the denylist remains
+ * authoritative, so naming one can never turn this check into a grant.
+ */
+export interface ChildToolPreflightOptions {
+  /**
+   * Treat a requested name the child cannot expose as a narrowed child instead
+   * of a configuration error. Callers that pass the parent's inherited tool
+   * surface need this: a package may register a tool only after the model
+   * enables it, and an SDK child never loads Pi's built-in extensions unless
+   * the caller injects them. An explicit allowlist leaves this off, so a
+   * declared name still fails before the first prompt.
+   */
+  tolerateInheritedMisses?: boolean;
+}
+
+export async function bindChildSessionExtensions(
+  session: ChildSessionStartup,
+  requestedTools?: readonly string[],
+  options?: ChildToolPreflightOptions,
+) {
+  await session.bindExtensions({ mode: "print" });
+  const requested = effectiveChildToolAllowlist(requestedTools);
+  let active: Set<string> | undefined;
+  let available: Set<string> | undefined;
+  if (
+    session.getActiveToolNames &&
+    session.getAllTools &&
+    session.setActiveToolsByName
+  ) {
+    const requestedSet = requested ? new Set(requested) : undefined;
+    available = new Set(session.getAllTools().map(({ name }) => name));
+    const activeNames = session.getActiveToolNames();
+    active = new Set(activeNames);
+    // 父级继承来的工具在子会话里往往只是"已注册但未激活"：内置扩展注册的
+    // tool_search / codemode，以及包提供的 web_search、agent_browser* 等，
+    // 都需要一次显式激活才会进入子会话的活动面。requested 是父级活动面去掉
+    // parent-only 工具后的白名单，按它激活不放宽任何边界；requested 缺失时
+    // 退回 CHILD_SAFE_PACKAGE_TOOL_NAMES。
+    const toActivate =
+      requestedSet ?? new Set<string>([...CHILD_SAFE_PACKAGE_TOOL_NAMES]);
+    for (const name of toActivate) {
+      if (available.has(name) && !active.has(name)) {
+        activeNames.push(name);
+        active.add(name);
+      }
+    }
+    if (activeNames.length !== session.getActiveToolNames().length) {
+      session.setActiveToolsByName(activeNames);
+    }
+    // Pi can refuse activation (for example, hidden exposure). Requested
+    // activation is not evidence that the final bound Session exposes a tool.
+    active = new Set(session.getActiveToolNames());
+  }
+  if (!requested) return;
+
+  if (!active && session.getActiveToolNames) {
+    active = new Set(session.getActiveToolNames());
+  }
+  if (!active) {
+    throw new Error(
+      "Child tool preflight failed: the bound child session does not expose active-tool introspection.",
+    );
+  }
+
+  const missing = [...new Set(requested)].filter((name) => !active.has(name));
+  if (missing.length === 0) return;
+
+  // An explicit allowlist is a claim about what the child must have, so a name
+  // it names still fails before the first prompt.
+  if (!options?.tolerateInheritedMisses) {
+    throw new Error(
+      `Child tool preflight failed: requested tool${missing.length === 1 ? "" : "s"} ${boundedToolNames(missing)} ${missing.length === 1 ? "is" : "are"} unavailable after child extensions initialized. Check the Agent Type tools list and child extension loading.`,
+    );
+  }
+
+  // `requested` is inherited from the parent's live tool surface, so a name the
+  // child cannot expose is not automatically an error. A parent can hold tools
+  // the child legitimately never gets: runtime-registered ones (an MCP server's
+  // tools, a package that activates tools on demand) or names no child
+  // extension registered at all. Failing the whole spawn over one of those is
+  // worse than running without it, so drop them and report once instead. The
+  // counts keep a genuine loading failure visible instead of silent.
+  const registeredCount = available?.size ?? 0;
+  const unregisteredCount = available
+    ? missing.filter((name) => !available.has(name)).length
+    : 0;
+  console.warn(
+    `[openpi] child tool surface narrowed: ${missing.length} of ${requested.length} requested tool(s) unavailable ` +
+      `(${unregisteredCount} never registered, ${missing.length - unregisteredCount} registered but inactive; ` +
+      `${active.size} active of ${registeredCount} registered). Dropped: ${boundedToolNames(missing)}`,
+  );
+}
+
+interface ChildExtensionRunner {
+  hasHandlers(eventType: string): boolean;
+  emit(event: SessionShutdownEvent): Promise<unknown>;
+}
+
+export interface DisposableChildSession {
+  readonly extensionRunner: ChildExtensionRunner;
+  abort?(): Promise<unknown>;
+  dispose(): void;
+}
+
+export interface ChildShutdownResult {
+  ok: boolean;
+  errors: string[];
+  timedOut: boolean;
+}
+
+const childShutdowns = new WeakMap<object, Promise<ChildShutdownResult>>();
+
+function shutdownError(error: unknown) {
+  return (error instanceof Error ? error.message : String(error)).slice(
+    0,
+    4096,
+  );
+}
+
+/** Await an operation but never longer than `timeoutMs`; return whether it settled. */
+export async function waitBounded(
+  operation: Promise<unknown>,
+  timeoutMs: number,
+) {
+  const result = await waitUntil(
+    operation,
+    Date.now() + timeoutMs,
+    "Operation",
+  );
+  return !result.timedOut;
+}
+
+/** Await an operation until a shared deadline and retain failure information. */
+async function waitUntil(
+  operation: Promise<unknown>,
+  deadline: number,
+  label: string,
+): Promise<{ error?: string; timedOut: boolean }> {
+  const remaining = Math.max(0, deadline - Date.now());
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<{ error: string; timedOut: true }>((resolve) => {
+    // This timer owns the awaited deadline contract. Keep it referenced so a
+    // short-lived Node 22 process cannot exit with the promise still pending.
+    timer = setTimeout(
+      () => resolve({ error: `${label} timed out`, timedOut: true }),
+      remaining,
+    );
+  });
+  const completed = operation.then(
+    () => ({ timedOut: false as const }),
+    (error) => ({
+      error: `${label} failed: ${shutdownError(error)}`,
+      timedOut: false as const,
+    }),
+  );
+  const result = await Promise.race([completed, timeout]);
+  if (timer) clearTimeout(timer);
+  return result;
+}
+
+/**
+ * Request abort when needed, emit child session_shutdown once, and dispose
+ * once. The whole sequence shares one deadline and reports timeout/failure
+ * instead of silently turning failed cleanup into success.
+ */
+export function shutdownAndDisposeChildSession(
+  session: DisposableChildSession,
+  options: {
+    timeoutMs?: number;
+    abort?: boolean;
+    abortOperation?: Promise<unknown>;
+  } = {},
+) {
+  const existing = childShutdowns.get(session);
+  if (existing) return existing;
+
+  const shutdown = (async (): Promise<ChildShutdownResult> => {
+    const errors: string[] = [];
+    let timedOut = false;
+    const deadline =
+      Date.now() + (options.timeoutMs ?? CHILD_SHUTDOWN_TIMEOUT_MS);
+
+    if (options.abort || options.abortOperation) {
+      let abortOperation = options.abortOperation;
+      try {
+        abortOperation ??= session.abort?.();
+      } catch (error) {
+        errors.push(`Agent abort failed: ${shutdownError(error)}`);
+      }
+      if (abortOperation) {
+        const result = await waitUntil(abortOperation, deadline, "Agent abort");
+        if (result.error) errors.push(result.error);
+        timedOut ||= result.timedOut;
+      }
+    }
+
+    try {
+      if (session.extensionRunner.hasHandlers("session_shutdown")) {
+        const result = await waitUntil(
+          session.extensionRunner.emit({
+            type: "session_shutdown",
+            reason: "quit",
+          }),
+          deadline,
+          "Child session shutdown",
+        );
+        if (result.error) errors.push(result.error);
+        timedOut ||= result.timedOut;
+      }
+    } catch (error) {
+      errors.push(`Child session shutdown failed: ${shutdownError(error)}`);
+    }
+
+    try {
+      session.dispose();
+    } catch (error) {
+      errors.push(`Child session disposal failed: ${shutdownError(error)}`);
+    }
+
+    return { ok: errors.length === 0, errors, timedOut };
+  })();
+
+  childShutdowns.set(session, shutdown);
+  return shutdown;
+}

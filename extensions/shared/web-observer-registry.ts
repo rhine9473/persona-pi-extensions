@@ -1,0 +1,831 @@
+import type {
+  LiveToolState,
+  SubagentSnapshot,
+  SubagentSpend,
+  TranscriptItem,
+  TranscriptPart,
+} from "../subagents/src/domain.ts";
+import type { ChildExecutionAdmissionSnapshot } from "./child-execution-admission.ts";
+
+export type WebCapabilityKind = "subagents" | "workflows";
+
+export const WEB_MAX_CAPABILITY_ITEMS = 32;
+const WEB_MAX_ACTIVITY_TEXT = 160;
+const WEB_MAX_WORKFLOW_AGENTS_SCANNED = 1_024;
+const WEB_MAX_CAPABILITY_ID = 160;
+
+export interface WebSubagentActivity {
+  readonly id: string;
+  readonly title: string;
+  /** Short assigned input for the task list, never a result or reasoning preview. */
+  readonly taskPreview?: string;
+  readonly origin?: "model" | "btw";
+  readonly status: "running" | "done" | "error" | "unknown";
+  readonly outcome?: "completed" | "failed" | "interrupted";
+  readonly createdAt: number;
+  readonly settledAt?: number;
+}
+
+export interface WebWorkflowAgentActivity {
+  readonly id: string;
+  readonly runId: string;
+  readonly title: string;
+  readonly taskPreview?: string;
+  readonly status: WebSubagentActivity["status"] | "unknown";
+  readonly outcome?: WebSubagentActivity["outcome"];
+  readonly createdAt: number;
+  readonly settledAt?: number;
+  readonly replayed?: boolean;
+}
+
+export interface WebWorkflowActivity {
+  readonly runId: string;
+  readonly name?: string;
+  readonly status: "running" | "completed" | "failed" | "aborted" | "uncertain";
+  readonly currentPhase?: string;
+  readonly startedAt: number;
+  readonly finishedAt?: number;
+  readonly agents: {
+    readonly total: number;
+    readonly running: number;
+    readonly done: number;
+    readonly error: number;
+    readonly uncertain: number;
+    readonly omitted?: number;
+  };
+  readonly children?: WebCapabilityProjection<WebWorkflowAgentActivity>;
+}
+
+export interface WebSubagentDetail extends WebSubagentActivity {
+  readonly kind: "subagents";
+  readonly cwd: string;
+  readonly model?: string;
+  readonly prompt: string;
+  readonly transcript: readonly (TranscriptItem & { readonly id?: string })[];
+  /** Presentation identity for the streaming message that will be appended next. */
+  readonly nextEntryId?: string;
+  readonly liveAssistant?: { readonly text: string; readonly thinking: string };
+  readonly liveTools: readonly LiveToolState[];
+  readonly finalText: string;
+  readonly errorText?: string;
+  /** Cumulative token spend for the child session. */
+  readonly spend?: SubagentSpend;
+  readonly truncated: boolean;
+  readonly omittedEntries: number;
+}
+
+export interface WebWorkflowAgentDetail
+  extends WebWorkflowAgentActivity,
+    Omit<WebSubagentDetail, keyof WebSubagentActivity | "kind"> {
+  readonly kind: "workflows";
+  /** Retained summaries and replay records may lack a child conversation. */
+  readonly transcriptUnavailable: boolean;
+}
+
+export type WebCapabilityActionRequest =
+  | {
+      readonly kind: "subagents";
+      readonly action: "spawn-btw";
+      readonly prompt: string;
+    }
+  | {
+      readonly kind: "subagents";
+      readonly action: "send-btw";
+      readonly id: string;
+      readonly text: string;
+    }
+  | {
+      readonly kind: "subagents";
+      readonly action: "cancel-btw";
+      readonly id: string;
+    };
+
+export interface WebCapabilityActionProvider {
+  readonly kind: WebCapabilityKind;
+  readonly run: (
+    request: WebCapabilityActionRequest,
+    signal?: AbortSignal,
+  ) => Promise<WebCapabilityDetail>;
+}
+
+export type WebCapabilityDetail = WebSubagentDetail | WebWorkflowAgentDetail;
+
+export type WebCapabilityDetailReceipt =
+  | { readonly status: "found"; readonly detail: WebCapabilityDetail }
+  | { readonly status: "invalid" }
+  | { readonly status: "missing" }
+  | { readonly status: "unavailable" };
+
+export interface WebCapabilityProjection<
+  Item = WebSubagentActivity | WebWorkflowActivity,
+> {
+  readonly items: readonly Item[];
+  readonly omitted: number;
+  /** Records were omitted or a user-visible string was shortened. */
+  readonly truncated: boolean;
+  /** Session-local child admission state, never a task prompt or transcript. */
+  readonly childExecutionAdmission?: ChildExecutionAdmissionSnapshot;
+}
+
+export interface WebCapabilitySnapshot {
+  readonly subagents?: WebCapabilityProjection<WebSubagentActivity>;
+  readonly workflows?: WebCapabilityProjection<WebWorkflowActivity>;
+}
+
+export interface WebCapabilityProvider {
+  readonly kind: WebCapabilityKind;
+  readonly snapshot: () => WebCapabilityProjection;
+  readonly detail?: (id: string) => WebCapabilityDetail | undefined;
+  readonly subscribe?: (listener: () => void) => () => void;
+}
+
+interface BoundedActivityText {
+  readonly value: string;
+  readonly truncated: boolean;
+}
+
+function boundedActivityText(
+  value: string,
+  limit = WEB_MAX_ACTIVITY_TEXT,
+): BoundedActivityText {
+  // Cut on code points: a UTF-16 unit cut can split a surrogate pair and emit a
+  // lone surrogate, which the JSON capability snapshot cannot represent.
+  const characters = [...value];
+  if (characters.length <= limit) {
+    return { value, truncated: false };
+  }
+  return {
+    value: `${characters.slice(0, limit - 1).join("")}…`,
+    truncated: true,
+  };
+}
+
+interface BoundedUtf8Text {
+  readonly value: string;
+  readonly bytes: number;
+  readonly truncated: boolean;
+}
+
+function boundedUtf8Tail(value: string, maxBytes: number): BoundedUtf8Text {
+  const encoded = new TextEncoder().encode(value);
+  if (encoded.byteLength <= maxBytes) {
+    return { value, bytes: encoded.byteLength, truncated: false };
+  }
+  let start = encoded.byteLength - maxBytes;
+  while (start < encoded.byteLength && (encoded[start]! & 0xc0) === 0x80) {
+    start++;
+  }
+  const retained = encoded.slice(start);
+  return {
+    value: new TextDecoder().decode(retained),
+    bytes: retained.byteLength,
+    truncated: true,
+  };
+}
+
+function newestActivityAt(value: {
+  readonly createdAt?: number;
+  readonly startedAt?: number;
+  readonly settledAt?: number;
+  readonly finishedAt?: number;
+}) {
+  return (
+    value.settledAt ??
+    value.finishedAt ??
+    value.createdAt ??
+    value.startedAt ??
+    0
+  );
+}
+
+function boundedActivityProjection<
+  Source extends {
+    readonly status: string;
+    readonly createdAt?: number;
+    readonly startedAt?: number;
+    readonly settledAt?: number;
+    readonly finishedAt?: number;
+  },
+  Item,
+>(
+  source: readonly Source[],
+  project: (value: Source) => {
+    readonly item: Item;
+    readonly truncated: boolean;
+  },
+) {
+  const selected: Source[] = [];
+  const compare = (left: Source, right: Source) => {
+    const running =
+      Number(right.status === "running") - Number(left.status === "running");
+    return running || newestActivityAt(right) - newestActivityAt(left);
+  };
+  for (const value of source) {
+    const insertAt = selected.findIndex(
+      (current) => compare(value, current) < 0,
+    );
+    if (insertAt < 0) selected.push(value);
+    else selected.splice(insertAt, 0, value);
+    if (selected.length > WEB_MAX_CAPABILITY_ITEMS) selected.pop();
+  }
+  const projected = selected.map(project);
+  const omitted = Math.max(0, source.length - projected.length);
+  return {
+    items: projected.map(({ item }) => item),
+    omitted,
+    truncated: omitted > 0 || projected.some((value) => value.truncated),
+  };
+}
+
+export function projectSubagentCapability(
+  source: readonly {
+    readonly id: string;
+    readonly title: string;
+    readonly prompt?: string;
+    readonly origin?: WebSubagentActivity["origin"];
+    readonly status: WebSubagentActivity["status"];
+    readonly outcome?: WebSubagentActivity["outcome"];
+    readonly createdAt: number;
+    readonly settledAt?: number;
+  }[],
+  childExecutionAdmission?: ChildExecutionAdmissionSnapshot,
+): WebCapabilityProjection<WebSubagentActivity> {
+  const projection = boundedActivityProjection(source, (value) => {
+    const id = boundedActivityText(value.id);
+    const title = boundedActivityText(value.title);
+    const task = value.prompt
+      ? boundedActivityText(value.prompt.replace(/\s+/gu, " ").trim(), 96)
+      : undefined;
+    return {
+      item: {
+        id: id.value,
+        title: title.value,
+        ...(task?.value ? { taskPreview: task.value } : {}),
+        ...(value.origin ? { origin: value.origin } : {}),
+        status: value.status,
+        ...(value.outcome ? { outcome: value.outcome } : {}),
+        createdAt: value.createdAt,
+        ...(value.settledAt !== undefined
+          ? { settledAt: value.settledAt }
+          : {}),
+      },
+      truncated: id.truncated || title.truncated || Boolean(task?.truncated),
+    };
+  });
+  return {
+    ...projection,
+    ...(childExecutionAdmission ? { childExecutionAdmission } : {}),
+  };
+}
+
+/** Project only manager-owned display data; never load child session files. */
+export function projectSubagentDetail(
+  source: SubagentSnapshot,
+): WebSubagentDetail {
+  return {
+    kind: "subagents",
+    ...boundedAgentDetail(
+      { ...source, model: source.meta.modelLabel },
+      Math.max(0, source.transcriptVersion - source.transcript.length),
+    ),
+  };
+}
+
+function boundedAgentDetail<Status extends WebWorkflowAgentActivity["status"]>(
+  source: Omit<
+    WebSubagentDetail,
+    "kind" | "status" | "truncated" | "omittedEntries"
+  > & { readonly status: Status },
+  transcriptOffset = 0,
+) {
+  let remainingBytes = 64 * 1024;
+  let truncated = false;
+  const text = (value: string, maxBytes = 4 * 1024) => {
+    if (remainingBytes === 0) {
+      truncated ||= value.length > 0;
+      return "";
+    }
+    const bounded = boundedUtf8Tail(value, Math.min(maxBytes, remainingBytes));
+    remainingBytes -= bounded.bytes;
+    truncated ||= bounded.truncated;
+    return bounded.value;
+  };
+  const title = text(source.title, 640);
+  const cwd = text(source.cwd, 2 * 1024);
+  const model =
+    source.model === undefined ? undefined : text(source.model, 640);
+  const prompt = text(source.prompt);
+  const finalText = text(source.finalText, 8 * 1024);
+  const errorText =
+    source.errorText === undefined ? undefined : text(source.errorText);
+  const liveAssistant = source.liveAssistant && {
+    text: text(source.liveAssistant.text, 8 * 1024),
+    thinking: text(source.liveAssistant.thinking),
+  };
+  // Pairing identities must survive byte bounds exactly, never as shared tails.
+  const toolIdentity = (id: string) => {
+    const bytes = new TextEncoder().encode(id).byteLength;
+    if (
+      !id ||
+      bytes > 640 ||
+      bytes > remainingBytes ||
+      /[\u0000-\u001f\u007f]/u.test(id)
+    ) {
+      truncated = true;
+      return undefined;
+    }
+    remainingBytes -= bytes;
+    return id;
+  };
+  const liveTools = source.liveTools.slice(-16).flatMap((tool) => {
+    const toolId = toolIdentity(tool.toolId);
+    if (toolId === undefined) return [];
+    return [
+      {
+        toolId,
+        name: text(tool.name, 640),
+        ...(tool.argsPreview !== undefined
+          ? { argsPreview: text(tool.argsPreview) }
+          : {}),
+        ...(tool.outputPreview !== undefined
+          ? { outputPreview: text(tool.outputPreview) }
+          : {}),
+        ...(tool.done !== undefined ? { done: tool.done } : {}),
+        ...(tool.isError !== undefined ? { isError: tool.isError } : {}),
+      },
+    ];
+  });
+  // Spend the remaining budget on recent activity first, then restore chronology.
+  const selected = source.transcript.slice(-64);
+  const transcript = selected
+    .reverse()
+    .flatMap((item, index): WebSubagentDetail["transcript"][number][] => {
+      const id = `entry-${transcriptOffset + source.transcript.length - 1 - index}`;
+      if (item.kind === "user")
+        return [{ id, kind: "user", text: text(item.text) }];
+      if (item.kind === "toolResult") {
+        const toolId = toolIdentity(item.toolId);
+        if (toolId === undefined) return [];
+        return [
+          {
+            id,
+            kind: "toolResult",
+            toolId,
+            name: text(item.name, 640),
+            isError: item.isError,
+            ...(item.outputPreview !== undefined
+              ? { outputPreview: text(item.outputPreview) }
+              : {}),
+          },
+        ];
+      }
+      truncated ||= item.parts.length > 32;
+      const parts = item.parts.slice(-32).flatMap((part): TranscriptPart[] => {
+        if (part.type === "toolCall") {
+          const toolId = toolIdentity(part.toolId);
+          if (toolId === undefined) return [];
+          return [
+            {
+              type: "toolCall",
+              toolId,
+              name: text(part.name, 640),
+              ...(part.argsPreview !== undefined
+                ? { argsPreview: text(part.argsPreview) }
+                : {}),
+            },
+          ];
+        }
+        if (part.type === "thinking")
+          return [
+            {
+              type: "thinking",
+              text: part.redacted ? "" : text(part.text),
+              ...(part.redacted !== undefined
+                ? { redacted: part.redacted }
+                : {}),
+            },
+          ];
+        return [{ type: "text", text: text(part.text) }];
+      });
+      return [{ id, kind: "assistant", parts }];
+    })
+    .reverse();
+  const omittedEntries = source.transcript.length - transcript.length;
+  return {
+    id: source.id,
+    title,
+    origin: source.origin,
+    status: source.status,
+    ...(source.outcome !== undefined ? { outcome: source.outcome } : {}),
+    createdAt: source.createdAt,
+    ...(source.settledAt !== undefined ? { settledAt: source.settledAt } : {}),
+    cwd,
+    ...(model !== undefined ? { model } : {}),
+    prompt,
+    transcript,
+    nextEntryId: `entry-${transcriptOffset + source.transcript.length}`,
+    ...(liveAssistant ? { liveAssistant } : {}),
+    liveTools,
+    finalText,
+    ...(errorText !== undefined ? { errorText } : {}),
+    ...(source.spend !== undefined ? { spend: source.spend } : {}),
+    truncated:
+      truncated ||
+      omittedEntries > 0 ||
+      source.liveTools.length > liveTools.length,
+    omittedEntries,
+  };
+}
+
+interface WorkflowAgentSource {
+  readonly index?: number;
+  readonly label?: string;
+  readonly state: string;
+  readonly startedAt?: number;
+  readonly finishedAt?: number;
+  readonly executionOutcome?: string;
+  readonly completion?: { readonly observed: { readonly outcome: string } };
+  readonly replayed?: boolean;
+  readonly transcript?: readonly {
+    readonly role?: string;
+    readonly kind?: string;
+    readonly text?: string;
+  }[];
+}
+
+function workflowAgentStatus(source: WorkflowAgentSource) {
+  const observed = source.completion?.observed.outcome;
+  if (
+    source.state === "uncertain" ||
+    observed === "uncertain" ||
+    source.executionOutcome === "uncertain"
+  )
+    return "unknown" as const;
+  // Native execution success does not erase a failure at the owner's result boundary.
+  if (source.state === "running" || source.state === "error")
+    return source.state;
+  const outcome = observed ?? source.executionOutcome;
+  if (outcome === "cancelled" || outcome === "failure") return "error" as const;
+  if (outcome === "success" || outcome === "replayed") return "done" as const;
+  return source.state === "done" ? source.state : ("unknown" as const);
+}
+
+function workflowAgentActivity(runId: string, source: WorkflowAgentSource) {
+  const id = `${runId}:call:${source.index}`;
+  if (
+    !/^wf_[0-9a-f]+$/i.test(runId) ||
+    !Number.isSafeInteger(source.index) ||
+    source.index === undefined ||
+    source.index < 1 ||
+    id.length > WEB_MAX_CAPABILITY_ID
+  )
+    return undefined;
+  const title = boundedActivityText(source.label ?? `Agent ${source.index}`);
+  const input = source.transcript?.find((entry) => entry.role === "user")?.text;
+  const task = input
+    ? boundedActivityText(input.replace(/\s+/gu, " ").trim(), 96)
+    : undefined;
+  const status = workflowAgentStatus(source);
+  const outcome =
+    status === "done"
+      ? ("completed" as const)
+      : status === "error"
+        ? (source.completion?.observed.outcome ?? source.executionOutcome) ===
+          "cancelled"
+          ? ("interrupted" as const)
+          : ("failed" as const)
+        : undefined;
+  const item: WebWorkflowAgentActivity = {
+    id,
+    runId,
+    title: title.value,
+    ...(task?.value ? { taskPreview: task.value } : {}),
+    status,
+    ...(outcome ? { outcome } : {}),
+    createdAt: source.startedAt ?? 0,
+    ...(source.finishedAt !== undefined
+      ? { settledAt: source.finishedAt }
+      : {}),
+    ...(source.replayed !== undefined ? { replayed: source.replayed } : {}),
+  };
+  return { item, truncated: title.truncated || Boolean(task?.truncated) };
+}
+
+/** Read-only projection of existing owner evidence, never a preview as a result. */
+export function projectWorkflowAgentDetail(
+  runId: string,
+  source: WorkflowAgentSource & {
+    readonly cwd?: string;
+    readonly model?: string;
+    readonly errorText?: string;
+    readonly transcript: readonly TranscriptItem[];
+    readonly transcriptUnavailable: boolean;
+  },
+): WebWorkflowAgentDetail | undefined {
+  const activity = workflowAgentActivity(runId, source);
+  if (!activity) return undefined;
+  const detail = boundedAgentDetail({
+    ...activity.item,
+    cwd: source.cwd ?? "",
+    model: source.model,
+    prompt: source.transcript.find((item) => item.kind === "user")?.text ?? "",
+    transcript: source.transcript,
+    liveTools: [],
+    finalText: "",
+    errorText: source.errorText,
+  });
+  return {
+    kind: "workflows",
+    ...activity.item,
+    ...detail,
+    transcriptUnavailable: source.transcriptUnavailable,
+    truncated: detail.truncated || activity.truncated,
+  };
+}
+
+export function projectWorkflowCapability(
+  source: readonly {
+    readonly runId: string;
+    readonly name?: string;
+    readonly status: WebWorkflowActivity["status"];
+    readonly currentPhase?: string;
+    readonly startedAt: number;
+    readonly finishedAt?: number;
+    readonly agents: readonly WorkflowAgentSource[];
+    readonly memoryProjection?: {
+      readonly omitted: { readonly agents: number };
+    };
+  }[],
+): WebCapabilityProjection<WebWorkflowActivity> {
+  return boundedActivityProjection(source, (value) => {
+    const runId = boundedActivityText(value.runId);
+    const name = value.name ? boundedActivityText(value.name) : undefined;
+    const phase = value.currentPhase
+      ? boundedActivityText(value.currentPhase)
+      : undefined;
+    const counts = {
+      total:
+        value.agents.length + (value.memoryProjection?.omitted.agents ?? 0),
+      running: 0,
+      done: 0,
+      error: 0,
+      uncertain: 0,
+    };
+    const scannedAgents = value.agents.slice(
+      0,
+      WEB_MAX_WORKFLOW_AGENTS_SCANNED,
+    );
+    for (const agent of scannedAgents) {
+      const status = workflowAgentStatus(agent);
+      if (status === "running") counts.running++;
+      else if (status === "done") counts.done++;
+      else if (status === "error") counts.error++;
+      else counts.uncertain++;
+    }
+    const agentsOmitted = counts.total - scannedAgents.length;
+    const indexCounts = new Map<number, number>();
+    for (const agent of scannedAgents) {
+      if (agent.index !== undefined)
+        indexCounts.set(agent.index, (indexCounts.get(agent.index) ?? 0) + 1);
+    }
+    const projectedChildren = scannedAgents.flatMap((agent) => {
+      if (agent.index === undefined || indexCounts.get(agent.index) !== 1)
+        return [];
+      const activity = workflowAgentActivity(value.runId, agent);
+      return activity
+        ? [{ ...activity.item, truncated: activity.truncated }]
+        : [];
+    });
+    const selectedChildren = boundedActivityProjection(
+      projectedChildren,
+      ({ truncated, ...item }) => ({ item, truncated }),
+    );
+    const children: WebCapabilityProjection<WebWorkflowAgentActivity> = {
+      ...selectedChildren,
+      omitted: counts.total - selectedChildren.items.length,
+      truncated:
+        selectedChildren.truncated ||
+        counts.total > selectedChildren.items.length,
+    };
+    return {
+      item: {
+        runId: runId.value,
+        ...(name ? { name: name.value } : {}),
+        status: value.status,
+        ...(phase ? { currentPhase: phase.value } : {}),
+        startedAt: value.startedAt,
+        ...(value.finishedAt !== undefined
+          ? { finishedAt: value.finishedAt }
+          : {}),
+        agents: {
+          ...counts,
+          ...(agentsOmitted > 0 ? { omitted: agentsOmitted } : {}),
+        },
+        children,
+      },
+      truncated:
+        runId.truncated ||
+        name?.truncated === true ||
+        phase?.truncated === true ||
+        agentsOmitted > 0 ||
+        children.truncated,
+    };
+  });
+}
+
+/** The Pi SessionManager object itself is the capability-lifetime identity. */
+export type WebCapabilityScope = object;
+
+type CapabilityListener = (scope: WebCapabilityScope) => void;
+type ProviderSubscriptions = Map<
+  WebCapabilityScope,
+  Map<WebCapabilityKind, () => void>
+>;
+
+interface WebObserverRegistry {
+  readonly version: 1;
+  readonly providers: Map<
+    WebCapabilityScope,
+    Map<WebCapabilityKind, WebCapabilityProvider>
+  >;
+  readonly actions: Map<
+    WebCapabilityScope,
+    Map<WebCapabilityKind, WebCapabilityActionProvider>
+  >;
+  readonly listeners: Map<CapabilityListener, ProviderSubscriptions>;
+}
+
+const WEB_OBSERVER_REGISTRY_KEY = Symbol.for(
+  "@tt-a1i/openpi/web-observer-registry/v1",
+);
+
+function sharedWebObserverRegistry(): WebObserverRegistry {
+  const existing: unknown = Reflect.get(globalThis, WEB_OBSERVER_REGISTRY_KEY);
+  if (existing !== undefined) {
+    if (
+      !existing ||
+      typeof existing !== "object" ||
+      (existing as { version?: unknown }).version !== 1 ||
+      !((existing as { providers?: unknown }).providers instanceof Map) ||
+      !((existing as { listeners?: unknown }).listeners instanceof Map)
+    ) {
+      throw new Error("Incompatible OpenPI Web observer registry");
+    }
+    const registry = existing as WebObserverRegistry;
+    if (!(registry.actions instanceof Map)) {
+      Object.defineProperty(registry, "actions", {
+        value: new Map(),
+        configurable: false,
+        enumerable: true,
+        writable: false,
+      });
+    }
+    return registry;
+  }
+  const registry: WebObserverRegistry = {
+    version: 1,
+    providers: new Map(),
+    actions: new Map(),
+    listeners: new Map(),
+  };
+  Object.defineProperty(globalThis, WEB_OBSERVER_REGISTRY_KEY, {
+    value: registry,
+    configurable: false,
+    enumerable: false,
+    writable: false,
+  });
+  return registry;
+}
+
+// Pi may load package extensions from a managed install while the standalone
+// CLI runs from a global npm install. Symbol.for keeps those same-process module
+// copies on one versioned registry without adding a second persistence layer.
+const { providers, actions, listeners } = sharedWebObserverRegistry();
+
+export function registerWebCapabilityActions(
+  scope: WebCapabilityScope,
+  provider: WebCapabilityActionProvider,
+) {
+  let scopedActions = actions.get(scope);
+  if (!scopedActions) {
+    scopedActions = new Map();
+    actions.set(scope, scopedActions);
+  }
+  scopedActions.set(provider.kind, provider);
+  return () => {
+    const current = actions.get(scope);
+    if (current?.get(provider.kind) !== provider) return;
+    current.delete(provider.kind);
+    if (current.size === 0) actions.delete(scope);
+  };
+}
+
+export async function runWebCapabilityAction(
+  scope: WebCapabilityScope,
+  request: WebCapabilityActionRequest,
+  signal?: AbortSignal,
+) {
+  const provider = actions.get(scope)?.get(request.kind);
+  if (!provider) return undefined;
+  return provider.run(request, signal);
+}
+
+function connect(
+  scope: WebCapabilityScope,
+  provider: WebCapabilityProvider,
+  listener: CapabilityListener,
+) {
+  const subscriptions = listeners.get(listener);
+  let scopedSubscriptions = subscriptions?.get(scope);
+  if (!scopedSubscriptions && subscriptions) {
+    scopedSubscriptions = new Map();
+    subscriptions.set(scope, scopedSubscriptions);
+  }
+  scopedSubscriptions?.get(provider.kind)?.();
+  const unsubscribe = provider.subscribe?.(() => listener(scope));
+  if (unsubscribe) scopedSubscriptions?.set(provider.kind, unsubscribe);
+  else scopedSubscriptions?.delete(provider.kind);
+}
+
+export function registerWebCapability(
+  scope: WebCapabilityScope,
+  provider: WebCapabilityProvider,
+) {
+  let scopedProviders = providers.get(scope);
+  if (!scopedProviders) {
+    scopedProviders = new Map();
+    providers.set(scope, scopedProviders);
+  }
+  scopedProviders.set(provider.kind, provider);
+  for (const listener of listeners.keys()) {
+    connect(scope, provider, listener);
+    listener(scope);
+  }
+  return () => {
+    const currentProviders = providers.get(scope);
+    if (currentProviders?.get(provider.kind) !== provider) return;
+    currentProviders.delete(provider.kind);
+    if (currentProviders.size === 0) providers.delete(scope);
+    for (const [listener, subscriptions] of listeners) {
+      const scopedSubscriptions = subscriptions.get(scope);
+      scopedSubscriptions?.get(provider.kind)?.();
+      scopedSubscriptions?.delete(provider.kind);
+      if (scopedSubscriptions?.size === 0) subscriptions.delete(scope);
+      listener(scope);
+    }
+  };
+}
+
+export function subscribeWebCapabilities(listener: CapabilityListener) {
+  const subscriptions: ProviderSubscriptions = new Map();
+  listeners.set(listener, subscriptions);
+  for (const [scope, scopedProviders] of providers) {
+    for (const provider of scopedProviders.values()) {
+      connect(scope, provider, listener);
+    }
+  }
+  return () => {
+    listeners.delete(listener);
+    for (const scopedSubscriptions of subscriptions.values()) {
+      for (const unsubscribe of scopedSubscriptions.values()) unsubscribe();
+    }
+  };
+}
+
+export function webCapabilitySnapshot(
+  scope: WebCapabilityScope,
+  kind?: WebCapabilityKind,
+): WebCapabilitySnapshot {
+  const scopedProviders = providers.get(scope);
+  if (!scopedProviders) return {};
+  return Object.fromEntries(
+    [...scopedProviders]
+      .filter(([providerKind]) => kind === undefined || providerKind === kind)
+      .map(([providerKind, provider]) => [providerKind, provider.snapshot()]),
+  );
+}
+
+export function webCapabilityDetail(
+  scope: WebCapabilityScope,
+  kind: WebCapabilityKind,
+  id: string,
+): WebCapabilityDetailReceipt {
+  if (
+    id.length === 0 ||
+    id.length > WEB_MAX_CAPABILITY_ID ||
+    /[\u0000-\u001f\u007f]/u.test(id)
+  ) {
+    return { status: "invalid" };
+  }
+  const provider = providers.get(scope)?.get(kind);
+  if (!provider?.detail) return { status: "unavailable" };
+  const detail = provider.detail(id);
+  if (!detail) return { status: "missing" };
+  if (detail.kind !== kind || detail.id !== id)
+    return { status: "unavailable" };
+  return { status: "found", detail };
+}
+
+export function notifyWebCapabilities(scope: WebCapabilityScope) {
+  for (const listener of listeners.keys()) listener(scope);
+}

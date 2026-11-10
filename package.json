@@ -11,8 +11,18 @@
     "extensions": [
       "./extensions/extension-manager",
       "./extensions/smart-models.ts",
-      "./extensions/sessions"
+      "./extensions/sessions",
+      "./extensions/turn-time.ts",
+      "./extensions/bash-timeout.ts",
+      "./extensions/user-input-fold.ts",
+      "./extensions/image-paste",
+      "./extensions/subagents"
+    ],
+    "skills": [
+      "./skills/subagents"
     ]
   },
-  "dependencies": {}
+  "dependencies": {
+    "effect": "^4.0.0-beta.103"
+  }
 }

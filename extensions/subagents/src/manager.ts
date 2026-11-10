@@ -1,0 +1,1050 @@
+/**
+ * SubagentManager — owns the registry of running/finished subagents.
+ *
+ * Each subagent is a scoped `SubagentSession` from a `SubagentBackend` plus a
+ * pump fiber that folds its normalized event stream into a mutable
+ * `SubagentSnapshot`. Closing a subagent's scope kills the underlying
+ * session/process and stops the pump.
+ *
+ * The manager also exposes a synchronous `SubagentReadModel` so the
+ * imperative TUI components (which render synchronously) can read snapshots
+ * and issue fire-and-forget commands without touching the Effect runtime.
+ *
+ * Pi owns provider transport timeouts and retries. This manager owns explicit
+ * cancellation, settlement, and bounded cleanup, not model-output deadlines.
+ */
+
+import {
+  Context,
+  Effect,
+  Exit,
+  Fiber,
+  Layer,
+  Result,
+  Scope,
+  Stream,
+} from "effect";
+import type { SubagentBackend, SubagentSession } from "./backend.ts";
+import type { AgentToolRenderer } from "../../shared/agent-tool-renderer.ts";
+import type {
+  ChildExecutionAdmission,
+  ChildExecutionLease,
+  ChildExecutionAdmissionSnapshot,
+} from "../../shared/child-execution-admission.ts";
+import { BackendRegistry } from "./backend.ts";
+import type {
+  BackendName,
+  LiveToolState,
+  RunOutcome,
+  SpawnTask,
+  SubagentEvent,
+  SubagentOrigin,
+  SubagentMeta,
+  SubagentSnapshot,
+  SubagentSpend,
+  SubagentStatus,
+  TranscriptItem,
+} from "./domain.ts";
+import {
+  BackendUnavailableError,
+  ConcurrencyLimitError,
+  SendError,
+  SpawnError,
+} from "./domain.ts";
+
+/** Model-spawned subagents get their own pool so a user aside cannot starve it. */
+export const MAX_RUNNING = 4;
+/**
+ * User "by the way" asides run in a separate, smaller pool. Keeping them off the
+ * model pool means a hung btw session can never consume a slot the model needs,
+ * and the model's "max N" error can honestly reflect only the model's own pool.
+ */
+export const MAX_RUNNING_BTW = 2;
+export const MAX_TRACKED = 64;
+const STOP_TIMEOUT_MS = 5_000;
+/** Session abort/shutdown (5s) plus bounded direct-worktree cleanup (4s). */
+const ENTRY_CLOSE_TIMEOUT_MS = 10_000;
+const ERROR_TEXT_MAX_LENGTH = 4_096;
+const TRANSCRIPT_TEXT_MAX_LENGTH = 64 * 1_024;
+const LIVE_ASSISTANT_MAX_LENGTH = 128 * 1_024;
+const FINAL_TEXT_MAX_LENGTH = 1_024 * 1_024;
+const MAX_TRANSCRIPT_ITEMS = 512;
+
+function bounded(text: string) {
+  return text.slice(0, ERROR_TEXT_MAX_LENGTH);
+}
+
+function boundedTranscriptText(text: string) {
+  return text.slice(0, TRANSCRIPT_TEXT_MAX_LENGTH);
+}
+
+function appendTranscript(snapshot: MutableSnapshot, item: TranscriptItem) {
+  snapshot.transcript.push(item);
+  if (snapshot.transcript.length > MAX_TRANSCRIPT_ITEMS) {
+    snapshot.transcript.splice(
+      0,
+      snapshot.transcript.length - MAX_TRANSCRIPT_ITEMS,
+    );
+  }
+  // Monotonic version so UI projections can detect transcript changes by
+  // O(1) comparison instead of scanning the mutable array.
+  snapshot.transcriptVersion++;
+}
+
+// --- Internal state -----------------------------------------------------------
+
+/** Mutable snapshot; exposed to readers via the readonly SubagentSnapshot type. */
+interface MutableSnapshot {
+  id: string;
+  origin: SubagentOrigin;
+  backend: BackendName;
+  title: string;
+  prompt: string;
+  cwd: string;
+  status: SubagentStatus;
+  outcome?: SubagentSnapshot["outcome"];
+  executionUncertain?: boolean;
+  worktreeBranch?: string;
+  worktreeBaseSha?: string;
+  requestedCwd?: string;
+  runGeneration?: number;
+  runStartEntryId?: string | null;
+  completionGeneration?: number;
+  evidence?: SubagentSnapshot["evidence"];
+  runTranscriptStart: number;
+  createdAt: number;
+  settledAt?: number;
+  errorText?: string;
+  meta: SubagentMeta;
+  usage: { tokens?: number; contextWindow?: number };
+  spend?: SubagentSpend;
+  transcript: TranscriptItem[];
+  /** Bumped on every transcript mutation; UI caches key on this. */
+  transcriptVersion: number;
+  liveAssistant?: { text: string; thinking: string };
+  liveTools: LiveToolState[];
+  queued: SubagentSnapshot["queued"];
+  finalText: string;
+  structuredResult?: SubagentSnapshot["structuredResult"];
+  turns: number;
+}
+
+interface Entry {
+  snapshot: MutableSnapshot;
+  session: SubagentSession;
+  scope: Scope.Closeable;
+  pump?: Fiber.Fiber<void>;
+  liveToolMap: Map<string, LiveToolState>;
+  retainedRenderTools: Set<string>;
+  /** Idle restart dispatched but RunStarted not folded yet; counts as running
+   * so concurrent restarts cannot race past the cap. */
+  restarting?: boolean;
+  admissionLease?: ChildExecutionLease;
+  admissionAbort?: AbortController;
+  /** A timed-out stop has no trustworthy terminal evidence: retain its lease. */
+  admissionUncertain?: boolean;
+}
+
+// --- Read model ----------------------------------------------------------------
+
+/** Synchronous bridge for the TUI. Snapshots are live objects; do not mutate. */
+export interface SubagentReadModel {
+  list(): ReadonlyArray<SubagentSnapshot>;
+  get(id: string): SubagentSnapshot | undefined;
+  /** Native tool projection retained by the live child session, when present. */
+  getToolRenderer?(id: string): AgentToolRenderer | undefined;
+  size(): number;
+  /** Shared Session admission state; no task prompts are exposed here. */
+  childExecutionAdmission?(): ChildExecutionAdmissionSnapshot | undefined;
+  /** Any-change notification (footer status, dashboard). */
+  subscribe(listener: () => void): () => void;
+  /** Per-subagent notification (takeover view). */
+  subscribeTo(id: string, listener: () => void): () => void;
+  /** Fire-and-forget: steer/continue a subagent (takeover input). */
+  requestSend(id: string, text: string): void;
+  /** Fire-and-forget: abort a running subagent (dashboard `x`, takeover). */
+  requestAbort(id: string): void;
+  /**
+   * Register the settle hook. `consumed` is true when an active
+   * subagent_wait/cancel is collecting the result (so it must not also be
+   * delivered as a follow-up message).
+   */
+  setOnSettled(
+    hook: ((snap: SubagentSnapshot, consumed: boolean) => void) | undefined,
+  ): void;
+}
+
+// --- Service --------------------------------------------------------------------
+
+export interface CancelResult {
+  readonly id: string;
+  readonly title: string;
+  readonly status: SubagentStatus;
+  readonly cancelled: boolean;
+}
+
+export interface SubagentManagerShape {
+  spawn(
+    backend: BackendName,
+    task: SpawnTask,
+  ): Effect.Effect<
+    SubagentSnapshot,
+    SpawnError | ConcurrencyLimitError | BackendUnavailableError
+  >;
+  /**
+   * Wait until all listed subagents are settled. Unknown ids are treated as
+   * settled (the tool layer validates ids first). While waiting, settles for
+   * these ids are marked "consumed". Interruption (tool abort) releases the
+   * interest and leaves the subagents running.
+   */
+  waitFor(
+    ids: ReadonlyArray<string>,
+    onPending?: (pending: string[]) => void,
+  ): Effect.Effect<void>;
+  /** Cancel running subagents; resolves when they have settled. */
+  cancel(
+    ids: ReadonlyArray<string>,
+  ): Effect.Effect<ReadonlyArray<CancelResult>>;
+  send(id: string, text: string): Effect.Effect<void, SendError>;
+  get(id: string): Effect.Effect<SubagentSnapshot | undefined>;
+  readonly list: Effect.Effect<ReadonlyArray<SubagentSnapshot>>;
+  readonly disposeAll: Effect.Effect<void>;
+  readonly view: SubagentReadModel;
+}
+
+export class SubagentManager extends Context.Service<
+  SubagentManager,
+  SubagentManagerShape
+>()("subagents/SubagentManager") {}
+
+// --- Implementation --------------------------------------------------------------
+
+const makeManager = (config: SubagentManagerConfig = {}) =>
+  Effect.gen(function* () {
+    const registry = yield* BackendRegistry;
+    // Detached forker for sync contexts (read-model commands, pruning) that
+    // preserves the manager's services instead of using the global runtime.
+    const runDetached = Effect.runForkWith(yield* Effect.context());
+
+    const entries = new Map<string, Entry>();
+    const waitInterest = new Map<string, number>();
+    const listeners = new Set<() => void>();
+    /** One-shot nextChange waiters, swapped out before invocation so waiters
+     * re-registering during notification are not visited in the same sweep. */
+    let changeWaiters: Array<{ ready: () => boolean; resume: () => void }> = [];
+    const idListeners = new Map<string, Set<() => void>>();
+    const cleanups = new Set<Fiber.Fiber<unknown>>();
+    let modelCounter = config.initialModelCounter ?? 0;
+    let btwCounter = config.initialBtwCounter ?? 0;
+    // Reservations are tracked per pool so the model and user "by the way" asides
+    // never contend for the same slots.
+    let reservedModel = 0;
+    let reservedBtw = 0;
+    let disposed = false;
+    let onSettled:
+      | ((snap: SubagentSnapshot, consumed: boolean) => void)
+      | undefined;
+
+    const notify = (id?: string) => {
+      const waiters = changeWaiters;
+      changeWaiters = [];
+      for (const waiter of waiters) {
+        if (waiter.ready()) waiter.resume();
+        else changeWaiters.push(waiter);
+      }
+      for (const listener of [...listeners]) {
+        try {
+          listener();
+        } catch {
+          // A failed status/render listener must not corrupt lifecycle state.
+        }
+      }
+      if (id) {
+        for (const listener of idListeners.get(id) ?? []) {
+          try {
+            listener();
+          } catch {
+            // Same.
+          }
+        }
+      }
+    };
+    // Workflow and Direct/BTW all mutate this one Session-owned fact. Forward
+    // its changes through the existing view subscription so an already-open
+    // operator dashboard repaints without a separate counter projection.
+    const unsubscribeAdmission = config.admission?.subscribe(() => notify());
+
+    /** Resolves on the next state change. Interruption unregisters the waiter. */
+    const nextChange = (ready = () => true) =>
+      Effect.callback<void>((resume) => {
+        const waiter = { ready, resume: () => resume(Effect.void) };
+        changeWaiters.push(waiter);
+        return Effect.sync(() => {
+          const index = changeWaiters.indexOf(waiter);
+          if (index >= 0) changeWaiters.splice(index, 1);
+        });
+      });
+
+    /**
+     * A restart dispatched by `send` occupies a slot immediately, but the
+     * `RunStarted` that flips `snapshot.status` only arrives on the async pump.
+     * Every caller that asks "is this busy?" must honor that window, or a
+     * wait/cancel issued in the same turn as the restart would observe the old
+     * settled run and return (or cancel) the wrong thing.
+     */
+    const isBusy = (entry: Entry | undefined) =>
+      entry !== undefined &&
+      (entry.snapshot.status === "running" || entry.restarting === true);
+
+    const runningCount = (origin?: SubagentOrigin) =>
+      [...entries.values()].filter(
+        (e) =>
+          isBusy(e) && (origin === undefined || e.snapshot.origin === origin),
+      ).length;
+
+    /** Per-pool capacity: model asides and user "by the way" asides never mix. */
+    const poolLimit = (origin: SubagentOrigin) =>
+      origin === "btw" ? MAX_RUNNING_BTW : MAX_RUNNING;
+    const poolReserved = (origin: SubagentOrigin) =>
+      origin === "btw" ? reservedBtw : reservedModel;
+    const atPoolCapacity = (origin: SubagentOrigin) =>
+      runningCount(origin) + poolReserved(origin) >= poolLimit(origin);
+
+    const addInterest = (ids: ReadonlyArray<string>) => {
+      for (const id of ids)
+        waitInterest.set(id, (waitInterest.get(id) ?? 0) + 1);
+    };
+    const releaseInterest = (ids: ReadonlyArray<string>) => {
+      for (const id of ids) {
+        const count = (waitInterest.get(id) ?? 1) - 1;
+        if (count <= 0) waitInterest.delete(id);
+        else waitInterest.set(id, count);
+      }
+    };
+
+    const closeEntryScope = (entry: Entry) =>
+      Scope.close(entry.scope, Exit.void).pipe(
+        Effect.tap(() =>
+          Effect.sync(() => {
+            const receipt = entry.session.cleanupReceipt?.();
+            if (!receipt?.uncertain) return;
+            const current = entry.snapshot.errorText;
+            entry.snapshot.errorText = current
+              ? `${current}; ${receipt.message}`
+              : receipt.message;
+            notify(entry.snapshot.id);
+          }),
+        ),
+        Effect.ignore,
+      );
+
+    const pruneSettled = () => {
+      if (entries.size <= MAX_TRACKED) return;
+      const candidates = [...entries.values()]
+        .filter((e) => !isBusy(e) && !waitInterest.has(e.snapshot.id))
+        .sort(
+          (a, b) =>
+            (a.snapshot.settledAt ?? a.snapshot.createdAt) -
+            (b.snapshot.settledAt ?? b.snapshot.createdAt),
+        );
+      for (const entry of candidates) {
+        if (entries.size <= MAX_TRACKED) break;
+        entries.delete(entry.snapshot.id);
+        const fiber = runDetached(closeEntryScope(entry));
+        cleanups.add(fiber);
+        fiber.addObserver(() => cleanups.delete(fiber));
+      }
+    };
+
+    const settle = (
+      entry: Entry,
+      outcome: RunOutcome,
+      releaseAdmission = true,
+    ) => {
+      const s = entry.snapshot;
+      const wasRestarting = entry.restarting === true;
+      entry.restarting = false;
+      if (s.status !== "running") {
+        if (!wasRestarting) return;
+        // A cancel can clear a queued restart before RunStarted reaches the
+        // manager. Its RunSettled still belongs to the new run, not the old
+        // settled snapshot, so promote the lifecycle before applying it.
+        if (s.runGeneration !== undefined) s.runGeneration++;
+        s.runTranscriptStart = s.transcriptVersion;
+        s.status = "running";
+        s.settledAt = undefined;
+        s.errorText = undefined;
+      }
+      s.settledAt = Date.now();
+      s.completionGeneration = s.runGeneration;
+      s.executionUncertain = !releaseAdmission;
+      switch (outcome._tag) {
+        case "Completed":
+          s.status = "done";
+          s.outcome = "completed";
+          s.errorText = undefined;
+          s.finalText = outcome.finalText.slice(0, FINAL_TEXT_MAX_LENGTH);
+          s.structuredResult = outcome.structuredResult;
+          break;
+        case "Failed":
+          s.status = "error";
+          s.outcome = "failed";
+          s.errorText = bounded(outcome.errorText);
+          // Never let a failed run report the previous run's successful output.
+          s.finalText = (outcome.partialText ?? "").slice(
+            0,
+            FINAL_TEXT_MAX_LENGTH,
+          );
+          s.structuredResult = undefined;
+          break;
+        case "Interrupted":
+          s.status = "error";
+          s.outcome = "interrupted";
+          s.errorText = "Run was aborted";
+          s.finalText = (outcome.partialText ?? "").slice(
+            0,
+            FINAL_TEXT_MAX_LENGTH,
+          );
+          s.structuredResult = undefined;
+          break;
+      }
+      s.liveAssistant = undefined;
+      entry.liveToolMap.clear();
+      s.liveTools = [];
+      s.queued = [];
+      entry.admissionAbort = undefined;
+      if (releaseAdmission) {
+        entry.admissionLease?.release();
+        entry.admissionLease = undefined;
+      }
+      const consumed = (waitInterest.get(s.id) ?? 0) > 0;
+      notify(s.id);
+      try {
+        // During teardown, don't queue results into a shutting-down session.
+        if (!disposed) onSettled?.(s, consumed);
+      } catch {
+        // The parent session may be unavailable; settlement stays final.
+      }
+      pruneSettled();
+    };
+
+    const foldEvent = (entry: Entry, event: SubagentEvent) => {
+      const s = entry.snapshot;
+      const transcriptVersion = s.transcriptVersion;
+      switch (event._tag) {
+        case "RunStarted":
+          if (event.generation !== undefined) {
+            s.runGeneration = event.generation;
+          } else if (s.status !== "running") {
+            s.runGeneration = (s.runGeneration ?? 0) + 1;
+          }
+          if (s.status !== "running") {
+            s.runTranscriptStart = s.transcriptVersion;
+          }
+          s.evidence = undefined;
+          s.runStartEntryId = event.startEntryId;
+          entry.restarting = false;
+          s.status = "running";
+          s.outcome = undefined;
+          s.executionUncertain = undefined;
+          s.settledAt = undefined;
+          s.errorText = undefined;
+          s.finalText = "";
+          s.completionGeneration = undefined;
+          s.structuredResult = undefined;
+          break;
+        case "RunSettled":
+          if (event.notStarted) s.runGeneration = undefined;
+          s.evidence = event.evidence;
+          settle(entry, event.outcome);
+          return; // settle() already notified
+        case "UserMessage":
+          appendTranscript(s, {
+            kind: "user",
+            text: boundedTranscriptText(event.text),
+          });
+          break;
+        case "AssistantDelta": {
+          const live = s.liveAssistant ?? { text: "", thinking: "" };
+          s.liveAssistant =
+            event.kind === "text"
+              ? {
+                  ...live,
+                  text: (live.text + event.delta).slice(
+                    -LIVE_ASSISTANT_MAX_LENGTH,
+                  ),
+                }
+              : {
+                  ...live,
+                  thinking: (live.thinking + event.delta).slice(
+                    -LIVE_ASSISTANT_MAX_LENGTH,
+                  ),
+                };
+          break;
+        }
+        case "AssistantMessage":
+          appendTranscript(s, {
+            kind: "assistant",
+            parts: event.parts.map((part) =>
+              part.type === "toolCall"
+                ? {
+                    ...part,
+                    argsPreview: part.argsPreview
+                      ? boundedTranscriptText(part.argsPreview)
+                      : undefined,
+                  }
+                : { ...part, text: boundedTranscriptText(part.text) },
+            ),
+          });
+          s.liveAssistant = undefined;
+          s.turns++;
+          break;
+        case "ToolStart":
+          entry.liveToolMap.set(event.toolId, {
+            toolId: event.toolId,
+            name: event.name,
+            argsPreview: event.argsPreview
+              ? boundedTranscriptText(event.argsPreview)
+              : undefined,
+          });
+          s.liveTools = [...entry.liveToolMap.values()];
+          break;
+        case "ToolUpdate": {
+          const current = entry.liveToolMap.get(event.toolId);
+          if (current) {
+            entry.liveToolMap.set(event.toolId, {
+              ...current,
+              outputPreview: event.outputPreview
+                ? boundedTranscriptText(event.outputPreview)
+                : current.outputPreview,
+            });
+            s.liveTools = [...entry.liveToolMap.values()];
+          }
+          break;
+        }
+        case "ToolEnd":
+          entry.liveToolMap.delete(event.toolId);
+          s.liveTools = [...entry.liveToolMap.values()];
+          appendTranscript(s, {
+            kind: "toolResult",
+            toolId: event.toolId,
+            name: event.name,
+            isError: event.isError,
+            outputPreview: event.outputPreview
+              ? boundedTranscriptText(event.outputPreview)
+              : undefined,
+          });
+          break;
+        case "QueueChanged":
+          s.queued = event.queued;
+          break;
+        case "UsageChanged":
+          s.usage = {
+            tokens: event.tokens ?? s.usage.tokens,
+            contextWindow: event.contextWindow ?? s.usage.contextWindow,
+          };
+          s.spend = event.spend ?? s.spend;
+          break;
+        case "MetaChanged":
+          s.meta = { ...s.meta, ...event.meta };
+          break;
+        case "BackendError":
+          s.errorText = bounded(event.message);
+          break;
+      }
+      if (s.transcriptVersion !== transcriptVersion) {
+        const retained = new Set(entry.liveToolMap.keys());
+        for (const item of s.transcript) {
+          if (item.kind === "toolResult") retained.add(item.toolId);
+          else if (item.kind === "assistant") {
+            for (const part of item.parts) {
+              if (part.type === "toolCall") retained.add(part.toolId);
+            }
+          }
+        }
+        // Backend events can be queued ahead of this projection. Release only
+        // IDs we actually observed leaving history, never unseen future data.
+        const evicted = new Set(
+          [...entry.retainedRenderTools].filter((id) => !retained.has(id)),
+        );
+        entry.session.toolRenderer?.releaseTools?.(evicted);
+        entry.retainedRenderTools = retained;
+      }
+      notify(s.id);
+    };
+
+    const spawn = (backendName: BackendName, task: SpawnTask) =>
+      Effect.gen(function* () {
+        const origin: SubagentOrigin = task.origin ?? "model";
+        let admissionLease: ChildExecutionLease | undefined;
+        let admissionAbandoned = false;
+        let poolReservationHeld = false;
+        let leaseTransferred = false;
+        const doSpawn = Effect.gen(function* () {
+          // Reserve synchronously before the first asynchronous operation so
+          // parallel tool calls cannot race past the pool cap.
+          yield* Effect.suspend(
+            (): Effect.Effect<void, SpawnError | ConcurrencyLimitError> => {
+              if (disposed) {
+                return new SpawnError({
+                  message: "Subagent manager is shutting down.",
+                });
+              }
+              if (atPoolCapacity(origin)) {
+                return new ConcurrencyLimitError({
+                  message: `Max ${poolLimit(origin)} ${
+                    origin === "btw" ? "by-the-way" : "subagent"
+                  } sessions can run concurrently. Wait for one to finish before spawning another.`,
+                });
+              }
+              if (origin === "btw") reservedBtw++;
+              else reservedModel++;
+              poolReservationHeld = true;
+              return Effect.void;
+            },
+          );
+          if (config.admission) {
+            const admission = config.admission;
+            yield* Effect.tryPromise({
+              // Take the lease in the promise continuation, not after the
+              // fiber resumes: an interrupt can land after admission granted
+              // the permit but before this fiber runs again, and the
+              // finalizer below must still find (or already have released) it.
+              try: (signal) =>
+                admission
+                  .acquire(origin === "btw" ? "btw" : "direct", signal)
+                  .then((lease) => {
+                    if (admissionAbandoned) lease.release();
+                    else admissionLease = lease;
+                  }),
+              catch: (error) =>
+                new SpawnError({
+                  message:
+                    error instanceof Error
+                      ? error.message
+                      : "Could not acquire a shared child execution slot.",
+                }),
+            });
+          }
+          const backend: SubagentBackend | undefined =
+            registry.get(backendName);
+          if (!backend) {
+            return yield* new BackendUnavailableError({
+              message: `Unknown backend "${backendName}".`,
+            });
+          }
+          const scope = yield* Scope.make();
+          const session = yield* Scope.provide(backend.spawn(task), scope).pipe(
+            Effect.onError(() => Scope.close(scope, Exit.void)),
+          );
+          if (disposed) {
+            yield* Scope.close(scope, Exit.void);
+            return yield* new SpawnError({
+              message: "Subagent manager shut down while spawning.",
+            });
+          }
+
+          const id =
+            origin === "btw" ? `btw-${++btwCounter}` : `sa-${++modelCounter}`;
+          const meta = yield* session.meta;
+          const entry: Entry = {
+            snapshot: {
+              id,
+              origin,
+              backend: backendName,
+              title: task.title,
+              prompt: task.prompt,
+              cwd: task.cwd,
+              requestedCwd: task.worktree?.repoCwd ?? task.cwd,
+              runGeneration: 1,
+              runTranscriptStart: 0,
+              status: "running",
+              ...(task.worktree
+                ? {
+                    worktreeBranch: task.worktree.branch,
+                    worktreeBaseSha: task.worktree.baseSha,
+                  }
+                : {}),
+              createdAt: Date.now(),
+              meta,
+              usage: { contextWindow: meta.contextWindow },
+              transcript: [],
+              transcriptVersion: 0,
+              liveTools: [],
+              queued: [],
+              finalText: "",
+              turns: 0,
+            },
+            session,
+            scope,
+            liveToolMap: new Map(),
+            retainedRenderTools: new Set(),
+            ...(admissionLease ? { admissionLease } : {}),
+          };
+          entries.set(id, entry);
+          leaseTransferred = true;
+
+          // Pump: fold the event stream into the snapshot. Tied to the entry
+          // scope, so closing the scope stops it. If the stream ends while the
+          // subagent still looks running, the backend died out from under us.
+          const pump = Stream.runForEach(session.events, (event) =>
+            Effect.sync(() => foldEvent(entry, event)),
+          ).pipe(
+            Effect.ensuring(
+              Effect.sync(() => {
+                if (isBusy(entry)) {
+                  settle(entry, {
+                    _tag: "Failed",
+                    errorText: "Backend event stream ended unexpectedly",
+                  });
+                }
+              }),
+            ),
+          );
+          entry.pump = yield* Scope.provide(Effect.forkScoped(pump), scope);
+
+          notify(id);
+          return entry.snapshot as SubagentSnapshot;
+        });
+
+        return yield* doSpawn.pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              admissionAbandoned = true;
+              if (poolReservationHeld) {
+                if (origin === "btw") reservedBtw--;
+                else reservedModel--;
+              }
+              if (!leaseTransferred) admissionLease?.release();
+              notify();
+            }),
+          ),
+        );
+      });
+
+    const waitFor = (
+      ids: ReadonlyArray<string>,
+      onPending?: (pending: string[]) => void,
+    ) =>
+      Effect.suspend(() => {
+        const unique = [...new Set(ids)];
+        addInterest(unique);
+        const loop = Effect.gen(function* () {
+          while (true) {
+            const pending = unique.filter((id) => isBusy(entries.get(id)));
+            if (pending.length === 0) return;
+            onPending?.(pending);
+            yield* nextChange(() =>
+              pending.some((id) => !isBusy(entries.get(id))),
+            );
+          }
+        });
+        return loop.pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              releaseInterest(unique);
+              pruneSettled();
+            }),
+          ),
+        );
+      });
+
+    /** Interrupt one busy entry, including the pre-RunStarted restart window. */
+    const abortEntry = (entry: Entry) =>
+      Effect.gen(function* () {
+        if (!isBusy(entry)) return;
+        if (entry.restarting && entry.admissionAbort) {
+          // This restart is only queued at the shared admission boundary; do
+          // not call into a dormant child Session that has not started again.
+          entry.admissionAbort.abort(new Error("Subagent restart was aborted"));
+          entry.admissionAbort = undefined;
+          entry.restarting = false;
+          notify(entry.snapshot.id);
+          return;
+        }
+        const graceful = yield* entry.session.interrupt.pipe(
+          Effect.timeout(config.stopTimeoutMs ?? STOP_TIMEOUT_MS),
+          Effect.result,
+        );
+        if (Result.isFailure(graceful)) {
+          // Settle before closing the scope so the pump's stream-ended
+          // fallback ("Backend event stream ended unexpectedly") cannot win
+          // the race and report the wrong terminal reason.
+          yield* Effect.sync(() => {
+            // The SDK did not produce terminal evidence in time. The legacy
+            // snapshot remains an error so the user sees the interruption, but
+            // admission stays held and this dormant Session cannot be revived:
+            // otherwise a timed-out stop could oversell the shared limit.
+            entry.admissionUncertain = true;
+            settle(entry, { _tag: "Interrupted" }, false);
+            entry.snapshot.errorText =
+              "Abort deadline exceeded; child termination is uncertain";
+            notify(entry.snapshot.id);
+          });
+          // Bound the close like disposeAll does: a stuck backend finalizer
+          // must not hang cancel after the run is already settled.
+          yield* closeEntryScope(entry).pipe(
+            Effect.timeout(ENTRY_CLOSE_TIMEOUT_MS),
+            Effect.ignore,
+          );
+        }
+      });
+
+    const cancel = (ids: ReadonlyArray<string>) =>
+      Effect.suspend(() => {
+        const unique = [...new Set(ids)];
+        const running = unique
+          .map((id) => entries.get(id))
+          .filter((entry): entry is Entry => isBusy(entry));
+        const runningIds = running.map((entry) => entry.snapshot.id);
+        // Mark consumed before interrupting so cancellation does not also
+        // enqueue duplicate automatic result messages into the parent.
+        addInterest(runningIds);
+        const work = Effect.gen(function* () {
+          yield* Effect.forEach(running, abortEntry, {
+            concurrency: "unbounded",
+          });
+          while (running.some(isBusy)) yield* nextChange();
+        });
+        return work.pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              releaseInterest(runningIds);
+              pruneSettled();
+            }),
+          ),
+          Effect.map(
+            (): ReadonlyArray<CancelResult> =>
+              unique.map((id) => {
+                const snapshot = entries.get(id)?.snapshot;
+                return {
+                  id,
+                  title: snapshot?.title ?? "?",
+                  status: snapshot?.status ?? "error",
+                  cancelled: runningIds.includes(id),
+                };
+              }),
+          ),
+        );
+      });
+
+    const send = (id: string, text: string) =>
+      Effect.suspend((): Effect.Effect<void, SendError> => {
+        const entry = entries.get(id);
+        if (!entry || disposed) {
+          return new SendError({
+            message: `Subagent "${id}" is no longer tracked.`,
+          });
+        }
+        if (entry.admissionAbort) {
+          return new SendError({
+            message:
+              "A subagent restart is waiting for a shared child execution slot.",
+          });
+        }
+        if (entry.admissionUncertain) {
+          return new SendError({
+            message:
+              "Cannot restart this child because its session is closed and its previous termination is uncertain. End the parent Session before starting more child executions.",
+          });
+        }
+        // Restarting a settled subagent occupies a running slot again, so it
+        // must respect the same cap as spawn. Steering an already-running one
+        // does not consume additional capacity.
+        if (!isBusy(entry)) {
+          const origin = entry.snapshot.origin;
+          if (atPoolCapacity(origin)) {
+            return new SendError({
+              message: `Max ${poolLimit(origin)} ${
+                origin === "btw" ? "by-the-way" : "subagent"
+              } sessions can run concurrently; restarting "${id}" would exceed that.`,
+            });
+          }
+          // Occupy the slot synchronously: the RunStarted that flips status
+          // arrives via the async pump, and two concurrent restarts must not
+          // both pass the check in that window. Cleared by RunStarted/settle,
+          // or here when the backend rejects the send.
+          entry.restarting = true;
+          let admissionAbandoned = false;
+          let restartLease: ChildExecutionLease | undefined;
+          const admissionAbort = config.admission
+            ? new AbortController()
+            : undefined;
+          entry.admissionAbort = admissionAbort;
+          return Effect.gen(function* () {
+            if (config.admission && admissionAbort) {
+              const admission = config.admission;
+              yield* Effect.tryPromise({
+                // Same interrupt window as spawn: hand the lease to the entry
+                // from the continuation so onError below can always release it.
+                try: (signal) => {
+                  const abortForEffect = () =>
+                    admissionAbort.abort(signal.reason);
+                  signal.addEventListener("abort", abortForEffect, {
+                    once: true,
+                  });
+                  return admission
+                    .acquire(
+                      origin === "btw" ? "btw" : "direct",
+                      admissionAbort.signal,
+                    )
+                    .then((lease) => {
+                      if (admissionAbandoned || admissionAbort.signal.aborted) {
+                        lease.release();
+                        throw (
+                          admissionAbort.signal.reason ??
+                          new Error("Subagent restart was aborted")
+                        );
+                      }
+                      restartLease = lease;
+                      entry.admissionLease = lease;
+                    })
+                    .finally(() =>
+                      signal.removeEventListener("abort", abortForEffect),
+                    );
+                },
+                catch: (error) =>
+                  new SendError({
+                    message:
+                      error instanceof Error
+                        ? error.message
+                        : "Could not acquire a shared child execution slot.",
+                  }),
+              });
+              // Explicit cancel can land after the promise continuation but
+              // before this fiber resumes. Never dispatch that stale restart.
+              if (admissionAbort.signal.aborted) {
+                return yield* new SendError({
+                  message: "Subagent restart was aborted",
+                });
+              }
+              entry.admissionAbort = undefined;
+            }
+            return yield* entry.session.send(text);
+          }).pipe(
+            Effect.onError(() =>
+              Effect.sync(() => {
+                admissionAbandoned = true;
+                // A cancelled attempt can reject after another send has
+                // already reserved this entry. Only clear our own attempt.
+                if (
+                  !admissionAbort ||
+                  entry.admissionAbort === admissionAbort ||
+                  (entry.admissionAbort === undefined &&
+                    restartLease !== undefined &&
+                    entry.admissionLease === restartLease)
+                ) {
+                  entry.restarting = false;
+                  entry.admissionAbort = undefined;
+                }
+                admissionAbort?.abort();
+                if (entry.admissionLease === restartLease)
+                  entry.admissionLease = undefined;
+                restartLease?.release();
+                notify(entry.snapshot.id);
+              }),
+            ),
+          );
+        }
+        return entry.session.send(text);
+      });
+
+    const disposeAll = Effect.gen(function* () {
+      disposed = true;
+      const all = [...entries.values()];
+      entries.clear();
+      for (const entry of all) entry.admissionAbort?.abort();
+      yield* Effect.forEach(
+        all,
+        (entry) =>
+          closeEntryScope(entry).pipe(
+            Effect.timeout(ENTRY_CLOSE_TIMEOUT_MS),
+            Effect.ignore,
+          ),
+        { concurrency: "unbounded" },
+      );
+      // Pruning cleanups are detached; bound them like everything else so a
+      // stuck backend finalizer cannot block runtime shutdown indefinitely.
+      yield* Effect.forEach(
+        [...cleanups],
+        (fiber) =>
+          Fiber.await(fiber).pipe(
+            Effect.timeout(STOP_TIMEOUT_MS),
+            Effect.ignore,
+          ),
+        { concurrency: "unbounded" },
+      ).pipe(Effect.ignore);
+      yield* Effect.sync(() => notify());
+    });
+
+    const view: SubagentReadModel = {
+      list: () => [...entries.values()].map((entry) => entry.snapshot),
+      get: (id) => entries.get(id)?.snapshot,
+      getToolRenderer: (id) => entries.get(id)?.session.toolRenderer,
+      size: () => entries.size,
+      childExecutionAdmission: () => config.admission?.snapshot(),
+      subscribe: (listener) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      subscribeTo: (id, listener) => {
+        let set = idListeners.get(id);
+        if (!set) {
+          set = new Set();
+          idListeners.set(id, set);
+        }
+        set.add(listener);
+        return () => {
+          set.delete(listener);
+          if (set.size === 0) idListeners.delete(id);
+        };
+      },
+      requestSend: (id, text) => {
+        runDetached(send(id, text).pipe(Effect.ignore));
+      },
+      requestAbort: (id) => {
+        const entry = entries.get(id);
+        if (!entry) return;
+        // UI-initiated aborts are not "consumed": the failed result still
+        // flows back to the parent as a follow-up message, matching v1.
+        runDetached(abortEntry(entry).pipe(Effect.ignore));
+      },
+      setOnSettled: (hook) => {
+        onSettled = hook;
+      },
+    };
+
+    // Safety net: disposing the ManagedRuntime tears everything down even if
+    // the extension forgot to call disposeAll explicitly.
+    yield* Effect.addFinalizer(() =>
+      Effect.sync(() => unsubscribeAdmission?.()).pipe(
+        Effect.andThen(disposeAll),
+      ),
+    );
+
+    return SubagentManager.of({
+      spawn,
+      waitFor,
+      cancel,
+      send,
+      get: (id) => Effect.sync(() => entries.get(id)?.snapshot),
+      list: Effect.sync(() => [...entries.values()].map((e) => e.snapshot)),
+      disposeAll,
+      view,
+    });
+  });
+
+export interface SubagentManagerConfig {
+  /** Session-branch high-water marks restored by the extension host. */
+  initialModelCounter?: number;
+  initialBtwCounter?: number;
+  /** Parent-session slot owner, shared with the Workflow extension. */
+  admission?: ChildExecutionAdmission;
+  /** Test-only seam for forced-stop lifecycle coverage. */
+  stopTimeoutMs?: number;
+}
+
+export const makeSubagentManagerLayer = (config: SubagentManagerConfig = {}) =>
+  Layer.effect(SubagentManager, makeManager(config));
+
+export const SubagentManagerLive = makeSubagentManagerLayer();
