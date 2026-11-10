@@ -10,7 +10,8 @@
   "pi": {
     "extensions": [
       "./extensions/extension-manager",
-      "./extensions/smart-models.ts"
+      "./extensions/smart-models.ts",
+      "./extensions/sessions"
     ]
   },
   "dependencies": {}
