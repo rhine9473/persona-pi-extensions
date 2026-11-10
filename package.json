@@ -1,0 +1,16 @@
+{
+  "name": "persona-pi-extensions",
+  "version": "1.0.0",
+  "description": "Personal Pi extensions suite by Rhine",
+  "keywords": [
+    "pi-package"
+  ],
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./extensions/extension-manager",
+      "./extensions/smart-models.ts"
+    ]
+  },
+  "dependencies": {}
+}
