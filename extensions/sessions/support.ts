@@ -138,13 +138,16 @@ export function sanitizeTerminalText(text: string) {
   return new TerminalTextSanitizer().push(text);
 }
 
-/** Check if a session belongs to a child subagent */
+/** Check if a session belongs to a child subagent or /btw aside */
 export function isSubagentSession(session: { name?: string }): boolean {
   if (!session.name) return false;
+  const name = session.name.trim();
   return (
-    session.name.startsWith("subagent[") ||
-    session.name.startsWith("subagent:") ||
-    session.name.startsWith("agent[") ||
-    session.name.startsWith("agent:")
+    name.startsWith("subagent[") ||
+    name.startsWith("subagent:") ||
+    name.startsWith("btw:") ||
+    name.startsWith("btw[") ||
+    name.startsWith("agent[") ||
+    name.startsWith("agent:")
   );
 }
