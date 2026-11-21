@@ -129,7 +129,6 @@ export class AntigravityConsole implements Component, Focusable {
   private filterQuery = "";
 
   private confirmDeleteId: string | undefined;
-  private showHelp = false;
   private loginState: InlineLoginState | undefined;
 
   private refreshingIds = new Set<string>();
@@ -348,9 +347,7 @@ export class AntigravityConsole implements Component, Focusable {
     const contentBudget = Math.max(4, termRows - 6); // top border, tab, underline, bottom hint, bottom border
     let bodyLines: string[] = [];
 
-    if (this.showHelp) {
-      bodyLines = this.renderHelpBody(g, innerWidth);
-    } else if (this.loginState?.active) {
+    if (this.loginState?.active) {
       bodyLines = this.loginState.render(this.theme, g, spinnerFrame, innerWidth);
     } else if (this.tab === "accounts") {
       bodyLines = this.renderAccountsBody(g, innerWidth, contentBudget, spinnerFrame, now);
@@ -1054,25 +1051,6 @@ export class AntigravityConsole implements Component, Focusable {
     return lines;
   }
 
-  private renderHelpBody(g: Glyphs, innerWidth: number): string[] {
-    const col = (key: string, desc: string) =>
-      `  ${this.theme.fg("accent", padRight(key, 10))} ${this.theme.fg("text", padRight(desc, 22))}`;
-    return [
-      ` ${this.theme.bold(this.theme.fg("accent", "快捷键一览"))}   ${this.theme.fg("dim", "(按 ? 或 Esc 返回)")}`,
-      "",
-      ` ${this.theme.fg("muted", "通用")}`,
-      truncateToWidth(`${col("Tab / 1-3", "切换标签页")}${col("↑↓ / j k", "移动光标")}${col("/", "筛选列表")}`, innerWidth),
-      truncateToWidth(`${col("r", "刷新全部账号额度")}${col("?", "显示/关闭帮助")}${col("Esc / q", "关闭面板")}`, innerWidth),
-      "",
-      ` ${this.theme.fg("muted", "账号页")}`,
-      truncateToWidth(`${col("Enter", "切换为首选并激活")}${col("Space", "暂停/恢复参与轮转")}${col("Shift+↑↓", "调整轮转顺位")}`, innerWidth),
-      truncateToWidth(`${col("a", "添加 / 登录新账号")}${col("d", "解绑账号 (确认)")}${col("x / o", "清冷却 / 打开验证")}`, innerWidth),
-      "",
-      ` ${this.theme.fg("muted", "模型页 & 诊断页")}`,
-      truncateToWidth(`${col("←→ / h l", "选思考档位 / 改设置")}${col("Enter", "应用模型 / 执行修复")}${col("i / y", "看路由ID / 复制诊断")}`, innerWidth),
-    ];
-  }
-
   private renderBottomHintLine(g: Glyphs, innerWidth: number): string {
     if (this.flashMessage) {
       const toneColor =
@@ -1111,12 +1089,11 @@ export class AntigravityConsole implements Component, Focusable {
         parts.splice(2, 0, hk("x", "清冷却"));
       }
       if (acc?.verifyUrl) parts.splice(2, 0, hk("o", "验证"));
-      parts.push(hk("?", "帮助"));
       hints = parts.join("  ");
     } else if (this.tab === "models") {
-      hints = [hk("Enter", "使用模型"), hk("←→", "思考档位"), hk("i", "运行时 ID"), hk("/", "筛选"), hk("?", "帮助")].join("  ");
+      hints = [hk("Enter", "使用模型"), hk("←→", "思考档位"), hk("i", "运行时 ID"), hk("/", "筛选")].join("  ");
     } else {
-      hints = [hk("Enter", "执行"), hk("←→", "修改设置"), hk("y", "复制诊断"), hk("?", "帮助")].join("  ");
+      hints = [hk("Enter", "执行"), hk("←→", "修改设置"), hk("y", "复制诊断")].join("  ");
     }
 
     const right = this.theme.fg("dim", "Esc 关闭");
@@ -1166,14 +1143,6 @@ export class AntigravityConsole implements Component, Focusable {
       return;
     }
 
-    if (this.showHelp) {
-      if (data === "?" || matchesKey(data, Key.escape) || data === "q") {
-        this.showHelp = false;
-        this.tui.requestRender();
-      }
-      return;
-    }
-
     if (matchesKey(data, Key.ctrl("c")) || data === "q") {
       this.close();
       return;
@@ -1192,12 +1161,6 @@ export class AntigravityConsole implements Component, Focusable {
         return;
       }
       this.close();
-      return;
-    }
-
-    if (data === "?") {
-      this.showHelp = true;
-      this.tui.requestRender();
       return;
     }
 
