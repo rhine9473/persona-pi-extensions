@@ -71,7 +71,7 @@ interface ToolSurfaceState {
 
 export const OPENPI_OWNER_SOURCE_PATHS = {
   gitRead: fileURLToPath(new URL("../git-read/index.ts", import.meta.url)),
-  subagents: fileURLToPath(new URL("../tools/pi-tool-subagents/index.ts", import.meta.url)),
+  subagents: fileURLToPath(new URL("../extensions/tools/pi-tool-subagents/index.ts", import.meta.url)),
   workflows: fileURLToPath(new URL("../workflows/index.ts", import.meta.url)),
   interaction: fileURLToPath(new URL("../ask-user/index.ts", import.meta.url)),
   plan: fileURLToPath(new URL("../plan-mode/index.ts", import.meta.url)),

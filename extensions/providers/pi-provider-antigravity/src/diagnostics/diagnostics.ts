@@ -20,7 +20,7 @@ export type DiagnosticsSnapshot = {
 
 const storage = new AsyncLocalStorage<DiagnosticsSnapshot>();
 
-/** Last completed request snapshot for `/antigravity.doctor`. */
+/** Last completed request snapshot for `/agy doctor`. */
 let lastSnapshot: DiagnosticsSnapshot = {};
 
 function currentBag(): DiagnosticsSnapshot {

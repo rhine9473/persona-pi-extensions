@@ -336,7 +336,7 @@ export function resolveOrchestrationSkillDirsOrThrow(
     try {
       dirs.push(
         resolve(
-          fileURLToPath(new URL(`../../skills/${name}`, import.meta.url)),
+          fileURLToPath(new URL(`../skills/${name}`, import.meta.url)),
         ),
       );
     } catch (error) {
@@ -669,7 +669,7 @@ function isVerifiedParentOnlyOpenPiExtension(extension: {
  * Fresh SDK options avoid turning the denylist into an accidental allowlist.
  *
  * `tools` narrows further, for an agent type that fixes a child's capabilities
- * (see `../subagents/src/agent-types.ts`). It can only ever REMOVE: pi admits a
+ * (see `../extensions/tools/pi-tool-subagents/src/agent-types.ts`). It can only ever REMOVE: pi admits a
  * tool when `(!allowed || allowed.has(name)) && !excluded.has(name)`, so an
  * allowlist naming an excluded tool still cannot obtain it, and the boundary
  * above stays authoritative. Omitting `tools` keeps today's behavior.
