@@ -16,7 +16,7 @@ Rhine 的个人专属 Pi Agent 扩展套件，按大类与统一前缀整理。
 3. **`pi-ui-sessions`** (`/sessions`)
    - 双栏历史会话选择器，带实时对话与代码变更预览，支持 `Ctrl+D` 删除、`Ctrl+B` 切换子代理、`Ctrl+T` 切换工作区。
 4. **`pi-ui-turn-time`**
-   - 每次回答结束后在底部显示耗时（如 `Worked for 2.3s`）。
+   - 每次回答结束后在底部显示极简分隔耗时线（如 `── ✓ 耗时 2s ────`）。
 5. **`pi-ui-input-fold`**
    - 终端里输入或粘贴大段日志时自动折叠显示，不刷屏。
 6. **`pi-ui-image-paste`**

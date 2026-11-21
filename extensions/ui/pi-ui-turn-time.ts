@@ -1,10 +1,11 @@
 /**
- * Close each finished request with the time it took, rendered under the final
- * message. The entry is TUI-only: it is never sent to the model.
+ * Close each finished request with a clean hairline divider and elapsed time,
+ * rendered under the final message. The entry is TUI-only: it is never sent to
+ * the model.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 interface TurnTimeData {
   ms: number;
@@ -32,14 +33,19 @@ export default function (pi: ExtensionAPI) {
     "turn-time",
     (entry, _options, theme) => {
       const ms = entry.data?.ms;
-      return new Text(
-        theme.fg(
-          "dim",
-          `✳ Worked for ${ms === undefined ? "?" : formatTurnDuration(ms)}`,
-        ),
-        1,
-        0,
-      );
+      const duration = ms === undefined ? "?" : formatTurnDuration(ms);
+      return {
+        render(width: number) {
+          const pad = " ";
+          const innerWidth = Math.max(12, width - 2);
+          const badge = ` ${theme.fg("success", "✓")} ${theme.fg("dim", `耗时 ${duration}`)} `;
+          const lead = theme.fg("borderMuted", "──");
+          const restCount = Math.max(0, innerWidth - 2 - visibleWidth(badge));
+          const tail = restCount > 0 ? theme.fg("borderMuted", "─".repeat(restCount)) : "";
+          return [truncateToWidth(`${pad}${lead}${badge}${tail}`, Math.max(1, width), "")];
+        },
+        invalidate() {},
+      };
     },
   );
 
