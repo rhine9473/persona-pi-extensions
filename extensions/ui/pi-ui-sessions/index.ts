@@ -1075,7 +1075,12 @@ async function showSessionPicker(
           // retain focus or take it from the visible session list.
           if (currentLayout.mode === "single") focus = "list";
 
-          if (data === "\u0014" || data === "\u001bw") {
+          if (
+            matchesKey(data, Key.ctrl("t")) ||
+            data === "\u0014" ||
+            matchesKey(data, Key.alt("w")) ||
+            data === "\u001bw"
+          ) {
             showAllWorkspaces = !showAllWorkspaces;
             void loadWorkspaceSessions(showAllWorkspaces);
             return;
