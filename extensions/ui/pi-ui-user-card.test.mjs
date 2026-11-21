@@ -73,7 +73,7 @@ test("renders translucent rounded card with CJK alignment, OSC 133 zones, and ze
       }
 
       const plain = lines.map(stripOscAndAnsi);
-      assert.match(plain[0], /^ ╭─ ❯ 你 ─+╮$/);
+      assert.match(plain[0], /^ ╭─ ❯ 你 ─+ \d{2}:\d{2} ─╮$/);
       assert.match(plain[plain.length - 1], /^ ╰─+╯$/);
       for (let i = 1; i < plain.length - 1; i++) {
         assert.match(plain[i], /^ │.*│$/);
@@ -99,6 +99,10 @@ test("preserves pi-ui-input-fold transformer and only activates in TUI mode", as
 
   const bigPaste = Array.from({ length: 30 }, (_, i) => `log line ${i + 1}: detail`).join("\n");
   installUserCard(() => themeMod.theme);
+  // ISO string timestamps (as passed during session restore) also render HH:MM cleanly.
+  const isoComp = new UserMessageComponent("hi", getMarkdownTheme(), 1, [], undefined, "2026-11-21T13:14:00.000Z");
+  assert.match(stripOscAndAnsi(isoComp.render(80)[0]), /^ ╭─ ❯ 你 ─+ \d{2}:\d{2} ─╮$/);
+
   const ts = new Date(2026, 10, 21, 21, 14, 0).getTime();
   const foldedComp = new UserMessageComponent(bigPaste, getMarkdownTheme(), 1, [transformUserMarkdown], undefined, ts);
   const plain = foldedComp.render(100).map(stripOscAndAnsi).join("\n");

@@ -31,6 +31,7 @@ interface SavedDescriptors {
 interface MirrorState {
   child: unknown;
   md: Markdown;
+  createdAt: number;
   cachedBody?: string[];
   cachedWidth?: number;
   cachedLines?: string[];
@@ -40,13 +41,13 @@ interface NativeUserMessageInternals {
   text?: string;
   markdownTheme?: MarkdownTheme;
   outputPad?: number;
-  timestamp?: number;
+  timestamp?: number | string;
   children?: Array<{ options?: Record<string, unknown> }>;
 }
 
-function formatClock(ts?: number): string {
-  if (typeof ts !== "number" || !Number.isFinite(ts) || ts <= 0) return "";
-  const d = new Date(ts);
+function formatClock(ts?: number | string): string {
+  if (ts === undefined || ts === null || ts === "") return "";
+  const d = typeof ts === "number" ? new Date(ts) : new Date(String(ts));
   if (Number.isNaN(d.getTime())) return "";
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
@@ -106,7 +107,7 @@ export function installUserCard(getTheme: () => Theme | undefined): void {
           { color: (content) => theme.fg("userMessageText", content) },
           child.options,
         );
-        mirror = { child, md };
+        mirror = { child, md, createdAt: mirror?.createdAt ?? Date.now() };
         mirrors.set(this, mirror);
       }
 
@@ -117,7 +118,7 @@ export function installUserCard(getTheme: () => Theme | undefined): void {
 
       const b = (s: string) => theme.fg("borderAccent", s);
       const badge = ` ${theme.fg("accent", theme.bold("❯ 你"))} `;
-      const clock = formatClock(internals.timestamp);
+      const clock = formatClock(internals.timestamp ?? mirror.createdAt);
       const meta = clock ? ` ${clock} ` : "";
       const topFill = Math.max(1, inner - 1 - visibleWidth(badge) - visibleWidth(meta) - (meta ? 1 : 0));
       const topLine = truncateToWidth(
