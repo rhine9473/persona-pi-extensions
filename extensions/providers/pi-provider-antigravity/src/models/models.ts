@@ -127,6 +127,10 @@ export const RUNTIME_MAX_OUTPUT_TOKENS: Record<string, number> = {
   "gemini-4-argon-low": 65536,
   "gemini-4-argon-medium": 65536,
   "gemini-4-argon-high": 65536,
+  "gemini-4-carbon": 65536,
+  "gemini-4-carbon-low": 65536,
+  "gemini-4-carbon-medium": 65536,
+  "gemini-4-carbon-high": 65536,
   "gemini-4-hydrogen": 262144,
   "gemini-4-hydrogen-low": 262144,
   "gemini-4-hydrogen-medium": 262144,
@@ -209,6 +213,7 @@ export function getMaxOutputTokens(modelId: string, runtimeModel?: string): numb
  * there is no cache-write rate to publish; the input rate is used.
  */
 const gemini38FlashCost = { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0.75 };
+const gemini4CarbonCost = { input: 2.0, output: 10.0, cacheRead: 0.1, cacheWrite: 2.0 };
 const gemini4HydrogenCost = { input: 1.5, output: 7.5, cacheRead: 0.075, cacheWrite: 1.5 };
 const gemini37FlashCost = { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0.75 };
 const gemini36FlashCost = { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0.75 };
@@ -231,6 +236,7 @@ export const ANTIGRAVITY_DISCOVERED_MODEL_COSTS: Record<
   string,
   { input: number; output: number; cacheRead: number; cacheWrite: number }
 > = {
+  "gemini-4-carbon": gemini4CarbonCost,
   "gemini-4-hydrogen": gemini4HydrogenCost,
   "gemini-3.5-flash": gemini35FlashCost,
   "gemini-3.5-flash-lite": gemini35FlashLiteCost,
@@ -544,6 +550,11 @@ export const ANTIGRAVITY_MODEL_ENUM: Record<string, string> = {
   "gemini-4-argon-high": "MODEL_PLACEHOLDER_M417",
   "gemini-4-argon-medium": "MODEL_PLACEHOLDER_M418",
   "gemini-4-argon-low": "MODEL_PLACEHOLDER_M419",
+  // Gemini 4 Carbon
+  "gemini-4-carbon": "MODEL_PLACEHOLDER_M438",
+  "gemini-4-carbon-high": "MODEL_PLACEHOLDER_M427",
+  "gemini-4-carbon-medium": "MODEL_PLACEHOLDER_M437",
+  "gemini-4-carbon-low": "MODEL_PLACEHOLDER_M438",
   // Gemini 4 Hydrogen
   "gemini-4-hydrogen": "MODEL_PLACEHOLDER_M527",
   "gemini-4-hydrogen-high": "MODEL_PLACEHOLDER_M525",

@@ -812,11 +812,14 @@ assert.equal(xhighOnlyRoute?.defaultRequestId, "gemini-4-xhigh-only-xhigh");
 assert.equal(xhighOnlyRoute?.off, "gemini-4-xhigh-only-xhigh");
 assert.equal(xhighOnlyRoute?.routing?.low, "gemini-4-xhigh-only-xhigh");
 
-// Hydrogen and Oxygen models pass through agentModelSorts filtering when selectable,
+// Hydrogen, Oxygen, and Carbon models pass through agentModelSorts filtering when selectable,
 // while disabled entries stay excluded, and alternate (X-High) / (Extra High) labels group.
 const extraAllowedCatalog = buildAntigravityCatalog(
   {
     "gemini-4-argon-medium": info("Gemini 4 Argon (Medium)"),
+    "gemini-4-carbon-low": info("Gemini 4 Carbon (Low)"),
+    "gemini-4-carbon-medium": info("Gemini 4 Carbon (Medium)"),
+    "gemini-4-carbon-high": info("Gemini 4 Carbon (High)"),
     "gemini-4-hydrogen-low": info("Gemini 4 Hydrogen (Low)"),
     "gemini-4-hydrogen-xhigh": info("Gemini 4 Hydrogen (X-High)"),
     "gemini-4-oxygen-high": info("Gemini 4 Oxygen (Extra High)"),
@@ -842,7 +845,11 @@ const extraAllowedCatalog = buildAntigravityCatalog(
 );
 assert.deepEqual(
   extraAllowedCatalog.models.map((model) => model.id).sort(),
-  ["gemini-4-argon", "gemini-4-hydrogen", "gemini-4-oxygen"],
+  ["gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen", "gemini-4-oxygen"],
+);
+assert.equal(
+  extraAllowedCatalog.routing["gemini-4-carbon"]?.routing?.high,
+  "gemini-4-carbon-high",
 );
 assert.equal(
   extraAllowedCatalog.routing["gemini-4-hydrogen"]?.routing?.xhigh,
