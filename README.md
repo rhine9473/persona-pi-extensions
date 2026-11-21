@@ -6,7 +6,9 @@ Rhine 的个人专属 Pi Agent 扩展套件，按大类与统一前缀整理。
 
 ### 1. 界面 UI / UX 类 (`extensions/ui/pi-ui-*`)
 
-1. **`pi-ui-extension-manager`** (`/extension-manager`)
+1. **`pi-ui-tidy`**
+   - 将单次回复中的全部工具调用默认折叠成一行透明汇总（如 `▸ 4 calls · read×3 · bash×1 · 8.4s`），按 `Ctrl+O` 随时展开查看完整调用详情。
+2. **`pi-ui-extension-manager`** (`/extension-manager`)
    - 终端全屏 TUI 扩展与包管理器。
    - 集中浏览、搜索扩展与包，查看用途与配置状态，支持单项/整包开关、差异对比、回滚与热重载。
 2. **`pi-ui-smart-models`** (`/models`, `/m`, `Alt+M`)
