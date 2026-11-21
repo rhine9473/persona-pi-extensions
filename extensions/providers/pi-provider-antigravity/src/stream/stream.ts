@@ -2132,6 +2132,7 @@ export function streamAntigravity(
       const capacityAttempts = capacityAttemptLimit();
       let capacityAttempt = 0;
       let emptyAttempt = 0;
+      let exhaustedAccountFailover = false;
 
       while (true) {
         if (opts.signal?.aborted) throw new Error("Request was aborted");
@@ -2349,6 +2350,7 @@ export function streamAntigravity(
               }
               emptyAttempt = 0;
               capacityAttempt = 0;
+              exhaustedAccountFailover = false;
               continue;
             }
             if (response?.status === 429 && /Quota reached\./i.test(friendly)) {
@@ -2356,38 +2358,40 @@ export function streamAntigravity(
             }
           }
           // A capacity refusal says nothing about the model yet: the same request
-          // succeeds once the shared pool drains. Walk the backoff ladder while
-          // attempts remain instead of surfacing a terminal "unavailable" (#158, #159).
-          if (
-            isCapacityFailure(response?.status, lastText) &&
-            capacityAttempt < capacityAttempts - 1
-          ) {
-            capacityAttempt += 1;
-            await sleepWithAbort(capacityBackoffMs(capacityAttempt), opts.signal);
-            continue;
-          }
+          // succeeds once the shared pool drains. After one cache-preserving retry
+          // on the current account, try another healthy account before walking the
+          // deeper backoff steps on a single congested account.
           if (isCapacityFailure(response?.status, lastText)) {
-            const next = await failoverToNextAccount(triedAccessTokens, {
-              pool,
-              failedToken: creds.token,
-              cooldownUntil: Date.now() + 60_000,
-              cooldownEstimated: true,
-              reason: `${poolDisplayName(pool)} 池持续拥堵，临时冷却 1m`,
-            });
-            if (next) {
-              triedAccessTokens.add(next.token);
-              creds = next;
-              if (next.email) setLastMaskedEmail(maskEmail(next.email));
-              requestHeaders = headersFor(creds.token);
-              const switchedProject = creds.projectId ? null : await loadCodeAssist(creds.token);
-              projectId = resolveProjectId({
-                token: creds.token,
-                warmedProject: switchedProject,
-                credentialProjectId: creds.projectId,
+            if (!exhaustedAccountFailover && (capacityAttempt >= 1 || capacityAttempt >= capacityAttempts - 1)) {
+              const next = await failoverToNextAccount(triedAccessTokens, {
+                pool,
+                failedToken: creds.token,
+                cooldownUntil: Date.now() + 60_000,
+                cooldownEstimated: true,
+                reason: `${poolDisplayName(pool)} 池持续拥堵，临时冷却 1 分钟`,
               });
-              setLastProjectId(projectId);
-              emptyAttempt = 0;
-              capacityAttempt = 0;
+              if (next) {
+                triedAccessTokens.add(next.token);
+                creds = next;
+                if (next.email) setLastMaskedEmail(maskEmail(next.email));
+                requestHeaders = headersFor(creds.token);
+                const switchedProject = creds.projectId ? null : await loadCodeAssist(creds.token);
+                projectId = resolveProjectId({
+                  token: creds.token,
+                  warmedProject: switchedProject,
+                  credentialProjectId: creds.projectId,
+                });
+                setLastProjectId(projectId);
+                emptyAttempt = 0;
+                capacityAttempt = 0;
+                exhaustedAccountFailover = false;
+                continue;
+              }
+              exhaustedAccountFailover = true;
+            }
+            if (capacityAttempt < capacityAttempts - 1) {
+              capacityAttempt += 1;
+              await sleepWithAbort(capacityBackoffMs(capacityAttempt), opts.signal);
               continue;
             }
           }

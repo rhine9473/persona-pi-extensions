@@ -49,6 +49,7 @@ import {
   maskEmailAddress,
   padLeft,
   padRight,
+  quotaColor,
   renderPoolCell,
   renderQuotaBar,
   resolveGlyphs,
@@ -476,27 +477,31 @@ export class AntigravityConsole implements Component, Focusable {
     }
 
     const lines: string[] = [];
-    const showDetail = budget >= 14 && (innerWidth >= 90 || this.compactDetailOpen);
-    const detailHeight = showDetail ? 7 : 0;
-    const listBudget = Math.max(3, budget - detailHeight - (showDetail ? 1 : 0));
+    const selectedAcc = accounts[this.selectedAccountIdx];
+    const showDetail = budget >= 14 && Boolean(selectedAcc) && (innerWidth >= 90 || this.compactDetailOpen);
+    const detailLines =
+      showDetail && selectedAcc ? this.renderAccountDetail(g, selectedAcc, innerWidth, now) : [];
+    const listBudget = Math.max(3, budget - (detailLines.length ? detailLines.length + 1 : 0));
 
     if (innerWidth >= 90) {
-      // Table mode (>=120 wide: 10-char bars + credits; 90-119: 6-char bars, no credits)
+      // Table mode (>=120 wide: full 24-char 5h/7d cells + conditional credits; 90-119: 20-char 5h/7d cells)
       const wide = innerWidth >= 120;
+      const hasAnyCredits = accounts.some((a) => a.cachedUsage?.credits !== undefined);
+      const showCredits = wide && hasAnyCredits;
       const barW = wide ? 10 : 6;
-      const poolW = barW + 5; // bar + space + 4-char pct
-      const creditsW = wide ? 8 : 0;
+      const poolW = wide ? 26 : 20;
+      const creditsW = showCredits ? 8 : 0;
       const orderW = 5;
       const tierW = 6;
       const statusW = 10;
       const rotW = 4;
       const fixedW =
-        2 + orderW + 2 + 2 + tierW + 2 + statusW + 2 + rotW + 2 + poolW + 2 + poolW + (wide ? 2 + creditsW : 0) + 1;
+        2 + orderW + 2 + 2 + tierW + 2 + statusW + 2 + rotW + 2 + poolW + 2 + poolW + (showCredits ? 2 + creditsW : 0) + 1;
       const emailW = Math.max(16, innerWidth - fixedW);
 
       const header =
         `  ${padRight("顺序", orderW)}  ${padRight("账号", emailW)}  ${padRight("套餐", tierW)}  ${padRight("状态", statusW)}  ${padRight("轮转", rotW)}  ${padRight("Gemini", poolW)}  ${padRight("Claude / GPT", poolW)}` +
-        (wide ? `  ${padLeft("积分", creditsW)}` : "");
+        (showCredits ? `  ${padLeft("积分", creditsW)}` : "");
       lines.push(this.theme.fg("muted", header));
 
       const rowsPerItem = 1;
@@ -547,7 +552,7 @@ export class AntigravityConsole implements Component, Focusable {
         const cCell = renderPoolCell(this.theme, g, acc, "claude_gpt", barW, poolW, loading, now);
         const crVal =
           acc.cachedUsage?.credits !== undefined ? acc.cachedUsage.credits.toLocaleString() : "—";
-        const crCell = wide
+        const crCell = showCredits
           ? `  ${this.theme.fg(acc.cachedUsage?.credits ? "text" : "dim", padLeft(crVal, creditsW))}`
           : "";
 
@@ -564,6 +569,7 @@ export class AntigravityConsole implements Component, Focusable {
       }
     } else if (innerWidth >= 60) {
       // Compact 2-line card mode (60-89)
+      const compactPoolW = Math.min(24, Math.max(18, Math.floor((innerWidth - 11) / 2)));
       const maxItems = Math.max(1, Math.floor(listBudget / 2));
       const start = Math.max(0, Math.min(this.selectedAccountIdx - Math.floor(maxItems / 2), accounts.length - maxItems));
       const visible = accounts.slice(start, start + maxItems);
@@ -582,14 +588,15 @@ export class AntigravityConsole implements Component, Focusable {
           `${prefix}${ord} ${this.theme.fg(acc.enabled ? "text" : "dim", email)}  ${this.theme.fg(badge.kind === "ultra" ? "accent" : "muted", padRight(badge.label, 5))}  ${this.theme.fg(st.color, padRight(`${g[st.glyphKey]} ${st.text}`, 9))}`,
           innerWidth,
         );
-        const gCell = renderPoolCell(this.theme, g, acc, "gemini", 6, 12, loading, now);
-        const cCell = renderPoolCell(this.theme, g, acc, "claude_gpt", 6, 12, loading, now);
+        const gCell = renderPoolCell(this.theme, g, acc, "gemini", 6, compactPoolW, loading, now);
+        const cCell = renderPoolCell(this.theme, g, acc, "claude_gpt", 6, compactPoolW, loading, now);
         const r2 = padRight(`     ${this.theme.fg("muted", "G")} ${gCell}  ${this.theme.fg("muted", "C")} ${cCell}`, innerWidth);
         lines.push(deleting ? this.theme.bg("toolErrorBg", r1) : selected ? this.theme.bg("selectedBg", r1) : r1);
         lines.push(deleting ? this.theme.bg("toolErrorBg", r2) : selected ? this.theme.bg("selectedBg", r2) : r2);
       }
     } else {
       // Minimal 1-line mode (<60)
+      const miniPoolW = 13;
       const maxItems = Math.max(1, listBudget);
       const start = Math.max(0, Math.min(this.selectedAccountIdx - Math.floor(maxItems / 2), accounts.length - maxItems));
       const visible = accounts.slice(start, start + maxItems);
@@ -598,9 +605,9 @@ export class AntigravityConsole implements Component, Focusable {
         const globalIdx = start + i;
         const selected = globalIdx === this.selectedAccountIdx;
         const st = accountStatusText(acc, now);
-        const name = padRight(shortEmail(acc.email, this.settings.maskEmails), Math.max(8, innerWidth - 24));
-        const gC = renderPoolCell(this.theme, g, acc, "gemini", 0, 6, undefined, now);
-        const cC = renderPoolCell(this.theme, g, acc, "claude_gpt", 0, 6, undefined, now);
+        const name = padRight(shortEmail(acc.email, this.settings.maskEmails), Math.max(8, innerWidth - 33));
+        const gC = renderPoolCell(this.theme, g, acc, "gemini", 0, miniPoolW, undefined, now);
+        const cC = renderPoolCell(this.theme, g, acc, "claude_gpt", 0, miniPoolW, undefined, now);
         const row = padRight(
           `${selected ? this.theme.fg("accent", g.cursor) : " "}${this.theme.fg(st.color, g[st.glyphKey])} ${this.theme.fg(acc.enabled ? "text" : "dim", name)} ${this.theme.fg("dim", "G")}${gC} ${this.theme.fg("dim", "C")}${cC}`,
           innerWidth,
@@ -609,12 +616,9 @@ export class AntigravityConsole implements Component, Focusable {
       }
     }
 
-    if (showDetail) {
-      const selectedAcc = accounts[this.selectedAccountIdx];
-      if (selectedAcc) {
-        lines.push(this.theme.fg("borderMuted", g.rule.repeat(innerWidth)));
-        lines.push(...this.renderAccountDetail(g, selectedAcc, innerWidth, now));
-      }
+    if (detailLines.length) {
+      lines.push(this.theme.fg("borderMuted", g.rule.repeat(innerWidth)));
+      lines.push(...detailLines);
     }
 
     return lines;
@@ -650,35 +654,50 @@ export class AntigravityConsole implements Component, Focusable {
     }
 
     const barW = innerWidth >= 95 ? 28 : 16;
-    const renderPoolDetailLine = (poolLabel: string, pool: QuotaPoolKey, windowLabel: string, frac?: number, resetIso?: string) => {
+    const renderPoolDetailLine = (
+      poolLabel: string,
+      pool: QuotaPoolKey,
+      windowLabel: string,
+      isPrimaryWindow: boolean,
+      frac?: number,
+      resetIso?: string,
+    ) => {
       const cd = acc.poolCooldowns[pool];
-      if (cd && cd.until > now && windowLabel === "5 小时") {
+      if (cd && cd.until > now && isPrimaryWindow) {
         const untilClock = formatClockTime(cd.until);
-        return ` ${padRight(poolLabel, 13)} ${padRight(windowLabel, 7)} ${this.theme.fg("warning", `${g.cooling} 冷却中 · ${untilClock} 恢复 (${formatCountdown(cd.until, now, cd.estimated)})`)}`;
+        const cachedPct = frac !== undefined ? ` · 缓存 ${Math.round(frac * 100)}%` : "";
+        return ` ${this.theme.fg("muted", padRight(poolLabel, 16))} ${this.theme.fg("dim", padRight(windowLabel, 8))} ${this.theme.fg("warning", `${g.cooling} 冷却中 · ${untilClock} 恢复 (${formatCountdown(cd.until, now, cd.estimated)})${cachedPct}`)}`;
       }
       const bar = renderQuotaBar(this.theme, g, frac, barW, false);
       const pct = frac !== undefined ? `${String(Math.round(frac * 100)).padStart(3)}%` : "  — ";
       const rst = resetIso ? formatResetIso(resetIso, now) : "";
-      return ` ${this.theme.fg("muted", padRight(poolLabel, 13))} ${this.theme.fg("dim", padRight(windowLabel, 7))} ${bar}  ${this.theme.fg(frac !== undefined && frac < 0.2 ? "error" : "text", pct)}  ${this.theme.fg("dim", rst)}`;
+      return ` ${this.theme.fg("muted", padRight(poolLabel, 16))} ${this.theme.fg("dim", padRight(windowLabel, 8))} ${bar}  ${this.theme.fg(frac !== undefined && frac < 0.2 ? "error" : "text", pct)}  ${this.theme.fg("dim", rst)}`;
     };
 
     const gp = acc.cachedUsage?.pools.gemini;
     const cp = acc.cachedUsage?.pools.claude_gpt;
     const ap = acc.cachedUsage?.pools.argon;
-    out.push(renderPoolDetailLine("Gemini", "gemini", "5 小时", gp?.remaining5h ?? gp?.remaining, gp?.reset5h ?? gp?.resetTime));
-    out.push(renderPoolDetailLine("", "gemini", "每周", gp?.remainingWeekly, gp?.resetWeekly));
-    out.push(renderPoolDetailLine("Claude / GPT", "claude_gpt", "5 小时", cp?.remaining5h ?? cp?.remaining, cp?.reset5h ?? cp?.resetTime));
-    out.push(renderPoolDetailLine("", "claude_gpt", "每周", cp?.remainingWeekly, cp?.resetWeekly));
+    out.push(renderPoolDetailLine("Gemini", "gemini", "5h 额度", true, gp?.remaining5h ?? gp?.remaining, gp?.reset5h ?? gp?.resetTime));
+    out.push(renderPoolDetailLine("", "gemini", "7d 额度", false, gp?.remainingWeekly, gp?.resetWeekly));
+    out.push(renderPoolDetailLine("Claude / GPT", "claude_gpt", "5h 额度", true, cp?.remaining5h ?? cp?.remaining, cp?.reset5h ?? cp?.resetTime));
+    out.push(renderPoolDetailLine("", "claude_gpt", "7d 额度", false, cp?.remainingWeekly, cp?.resetWeekly));
     if (ap) {
-      out.push(renderPoolDetailLine("Gemini 4 Argon", "argon", "周额度", ap.remainingWeekly ?? ap.remaining, ap.resetWeekly ?? ap.resetTime));
+      if (ap.remaining5h !== undefined) {
+        out.push(renderPoolDetailLine("Gemini 4 Argon", "argon", "5h 额度", true, ap.remaining5h, ap.reset5h ?? ap.resetTime));
+        out.push(renderPoolDetailLine("", "argon", "7d 额度", false, ap.remainingWeekly ?? ap.remaining, ap.resetWeekly ?? ap.resetTime));
+      } else {
+        out.push(renderPoolDetailLine("Gemini 4 Argon", "argon", "7d 额度", true, ap.remainingWeekly ?? ap.remaining, ap.resetWeekly ?? ap.resetTime));
+      }
     }
 
     const creditsStatus = getCreditsStatus();
-    const crText =
-      acc.cachedUsage?.credits !== undefined ? acc.cachedUsage.credits.toLocaleString() : "—";
-    out.push(
-      ` ${this.theme.fg("muted", "AI 积分")} ${this.theme.fg("text", crText)}  ${this.theme.fg("dim", "·")}  ${this.theme.fg("muted", "超额兜底")} ${this.theme.fg(creditsStatus.enabled ? "success" : "dim", creditsStatus.enabled ? "开" : "关")}`,
-    );
+    if (acc.cachedUsage?.credits !== undefined || creditsStatus.enabled) {
+      const crText =
+        acc.cachedUsage?.credits !== undefined ? acc.cachedUsage.credits.toLocaleString() : "—";
+      out.push(
+        ` ${this.theme.fg("muted", "AI 积分")} ${this.theme.fg("text", crText)}  ${this.theme.fg("dim", "·")}  ${this.theme.fg("muted", "超额兜底")} ${this.theme.fg(creditsStatus.enabled ? "success" : "dim", creditsStatus.enabled ? "开" : "关")}`,
+      );
+    }
 
     return out;
   }
@@ -746,14 +765,34 @@ export class AntigravityConsole implements Component, Focusable {
           return !(cd && cd.until > now);
         }).length;
         const quota = activeAccount?.cachedUsage?.pools[pool];
-        const frac = quota?.remaining ?? quota?.remaining5h ?? quota?.remainingWeekly;
         const cd = activeAccount?.poolCooldowns[pool];
-        const poolStatus =
-          cd && cd.until > now
-            ? this.theme.fg("warning", `${g.cooling} 当前号冷却 (${formatCountdown(cd.until, now, cd.estimated)})`)
-            : frac !== undefined
-              ? `${renderQuotaBar(this.theme, g, frac, 10)}  ${this.theme.fg("text", `${Math.round(frac * 100)}%`)}`
-              : this.theme.fg("dim", "—");
+        const q5 = quota?.remaining5h;
+        const q7 = quota?.remainingWeekly;
+        const qAny = quota?.remaining;
+        let poolStatus: string;
+        if (cd && cd.until > now) {
+          poolStatus = this.theme.fg("warning", `${g.cooling} 当前号冷却 (${formatCountdown(cd.until, now, cd.estimated)})`);
+        } else if (q5 !== undefined && q7 !== undefined) {
+          const p5 =
+            q5 <= 0
+              ? this.theme.fg("error", "耗尽")
+              : this.theme.fg(quotaColor(this.theme, q5), `${Math.round(q5 * 100)}%`);
+          const p7 =
+            q7 <= 0
+              ? this.theme.fg("error", "耗尽")
+              : this.theme.fg(quotaColor(this.theme, q7), `${Math.round(q7 * 100)}%`);
+          poolStatus = `${this.theme.fg("muted", "5h")} ${renderQuotaBar(this.theme, g, q5, 6)} ${p5} ${this.theme.fg("dim", "·")} ${this.theme.fg("muted", "7d")} ${p7}`;
+        } else if (q5 !== undefined || q7 !== undefined || qAny !== undefined) {
+          const frac = q5 ?? q7 ?? qAny!;
+          const tag = q5 !== undefined ? "5h " : q7 !== undefined ? "7d " : "";
+          const pct =
+            frac <= 0
+              ? this.theme.fg("error", "耗尽")
+              : this.theme.fg(quotaColor(this.theme, frac), `${Math.round(frac * 100)}%`);
+          poolStatus = `${this.theme.fg("muted", tag)}${renderQuotaBar(this.theme, g, frac, 10)}  ${pct}`;
+        } else {
+          poolStatus = this.theme.fg("dim", "—");
+        }
         lines.push(
           padRight(
             ` ${this.theme.bold(this.theme.fg("muted", padRight(poolDisplayName(pool), 14)))} ${poolStatus}  ${this.theme.fg("dim", `可用 ${readyAccs}/${this.accounts.length} 号`)}`,
@@ -911,9 +950,9 @@ export class AntigravityConsole implements Component, Focusable {
     rows.push({
       id: "set-credits",
       section: "setting",
-      label: "积分超额",
+      label: "AI 积分超额",
       value: `‹ ${credits.enabled ? "开" : "关"} ›`,
-      note: credits.source === "env" ? `锁定 · ${credits.detail}` : "常规配额耗尽时是否使用 Google AI 积分",
+      note: credits.source === "env" ? `锁定 · ${credits.detail}` : "仅对已购 Google One AI 积分的账号生效",
       locked: credits.source === "env",
     });
 
@@ -1075,7 +1114,7 @@ export class AntigravityConsole implements Component, Focusable {
       parts.push(hk("?", "帮助"));
       hints = parts.join("  ");
     } else if (this.tab === "models") {
-      hints = [hk("Enter", "使用模型"), hk("←→", "思考档位"), hk("i", "运行时ID"), hk("/", "筛选"), hk("?", "帮助")].join("  ");
+      hints = [hk("Enter", "使用模型"), hk("←→", "思考档位"), hk("i", "运行时 ID"), hk("/", "筛选"), hk("?", "帮助")].join("  ");
     } else {
       hints = [hk("Enter", "执行"), hk("←→", "修改设置"), hk("y", "复制诊断"), hk("?", "帮助")].join("  ");
     }

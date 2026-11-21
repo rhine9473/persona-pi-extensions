@@ -473,11 +473,15 @@ export function toCachedAccountUsage(usage: AccountUsage): CachedAccountUsage {
     const entry: CachedPoolQuota = pools[pool] ?? {};
     for (const bucket of group.buckets) {
       if (isFiveHourBucket(bucket)) {
-        entry.remaining5h = bucket.remainingFraction;
-        entry.reset5h = bucket.resetTime;
+        if (entry.remaining5h === undefined || bucket.remainingFraction < entry.remaining5h) {
+          entry.remaining5h = bucket.remainingFraction;
+          entry.reset5h = bucket.resetTime;
+        }
       } else if (isWeeklyBucket(bucket)) {
-        entry.remainingWeekly = bucket.remainingFraction;
-        entry.resetWeekly = bucket.resetTime;
+        if (entry.remainingWeekly === undefined || bucket.remainingFraction < entry.remainingWeekly) {
+          entry.remainingWeekly = bucket.remainingFraction;
+          entry.resetWeekly = bucket.resetTime;
+        }
       }
       if (
         entry.remaining === undefined ||

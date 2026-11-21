@@ -25,8 +25,11 @@ const { saveAntigravitySettings } = await import("../src/utils/settings.ts");
 const { AntigravityConsole } = await import("../src/ui/console.ts");
 const {
   formatAccountsPlainText,
+  formatCountdown,
   formatDiagnosticsPlainText,
   formatModelsPlainText,
+  formatRelativeAge,
+  formatResetIso,
 } = await import("../src/ui/format.ts");
 
 // 1. Model deduplication & GPT-OSS casing
@@ -102,17 +105,64 @@ assert.equal(listAccounts()[0]?.email, "second@gmail.com");
 assert.equal(moveAccountOrder("second@gmail.com", 1), true);
 assert.equal(listAccounts()[0]?.email, "first@gmail.com");
 
-// Record usage for max-quota strategy
+// Record usage with distinct 5h and 7d windows + Argon
+const now = Date.now();
 recordAccountUsage("first@gmail.com", {
-  fetchedAt: Date.now(),
+  fetchedAt: now - 35_000,
   planLabel: "Google AI Ultra",
   credits: 1200,
-  pools: { gemini: { remaining: 0.45 }, claude_gpt: { remaining: 0.9 } },
+  pools: {
+    gemini: {
+      remaining: 0.15,
+      remaining5h: 0.15,
+      reset5h: new Date(now + 34 * 60_000).toISOString(),
+      remainingWeekly: 0.73,
+      resetWeekly: new Date(now + (3 * 24 + 19) * 3600_000).toISOString(),
+    },
+    claude_gpt: {
+      remaining: 0.12,
+      remaining5h: 0.12,
+      reset5h: new Date(now + (3 * 60 + 8) * 60_000).toISOString(),
+      remainingWeekly: 0.56,
+      resetWeekly: new Date(now + (6 * 24 + 22) * 3600_000).toISOString(),
+    },
+    argon: {
+      remaining: 1,
+      remainingWeekly: 1,
+      resetWeekly: new Date(now + (6 * 24 + 5) * 3600_000).toISOString(),
+    },
+  },
 });
 recordAccountUsage("second@gmail.com", {
-  fetchedAt: Date.now(),
+  fetchedAt: now - 35_000,
   planLabel: "Google AI Pro",
-  pools: { gemini: { remaining: 0.88 }, claude_gpt: { remaining: 0.61 } },
+  pools: {
+    gemini: {
+      remaining: 0.88,
+      remaining5h: 0.88,
+      reset5h: new Date(now + 4 * 3600_000).toISOString(),
+      remainingWeekly: 1,
+      resetWeekly: new Date(now + (3 * 24 + 18) * 3600_000).toISOString(),
+    },
+    claude_gpt: {
+      remaining: 0.61,
+      remaining5h: 1,
+      remainingWeekly: 0.61,
+    },
+  },
+});
+recordAccountUsage("third@gmail.com", {
+  fetchedAt: now - 35_000,
+  planLabel: "Google AI Pro",
+  pools: {
+    gemini: {
+      remaining: 0,
+      remaining5h: 0,
+      reset5h: new Date(now + 25 * 60_000).toISOString(),
+      remainingWeekly: 0.88,
+    },
+    claude_gpt: { remaining: 0.8, remaining5h: 0.8, remainingWeekly: 0.9 },
+  },
 });
 
 // Failover marks cooldown and switches to second
@@ -143,7 +193,7 @@ saveAntigravitySettings({ strategy: "max-quota" });
 const maxSel = await selectAccountForRequest("gemini-4-hydrogen", "tok-second");
 assert.equal(maxSel.kind, "selected");
 if (maxSel.kind === "selected") {
-  assert.equal(maxSel.account.email, "second@gmail.com", "max-quota prefers 88% over 45%");
+  assert.equal(maxSel.account.email, "second@gmail.com", "max-quota prefers 88% over 15%");
 }
 
 // 4. TUI width invariant tests at 48, 72, 100, 140 across tabs and glyph modes
@@ -190,9 +240,78 @@ for (const glyphs of ["unicode", "ascii"] as const) {
   }
 }
 
+// 4b. Verify 5h/7d dual rendering, Argon full label, Chinese units, and conditional credits column
+recordAccountUsage("second@gmail.com", {
+  fetchedAt: now - 35_000,
+  planLabel: "Google AI Pro",
+  pools: {
+    gemini: {
+      remaining: 0,
+      remaining5h: 1,
+      reset5h: new Date(now + 4 * 3600_000).toISOString(),
+      remainingWeekly: 0,
+      resetWeekly: new Date(now + (3 * 24 + 18) * 3600_000).toISOString(),
+    },
+    claude_gpt: {
+      remaining: 0.61,
+      remaining5h: 1,
+      remainingWeekly: 0.61,
+    },
+  },
+});
+const accountsComp = new AntigravityConsole(
+  fakePi,
+  fakeCtx,
+  { requestRender: () => {}, terminal: { rows: 28, columns: 140 } },
+  fakeTheme,
+  fakeKb,
+  () => {},
+  { initialTab: "accounts" },
+);
+const wideAccountsText = accountsComp.render(140).join("\n");
+assert.match(wideAccountsText, /5h\s+15%\s+·\s+7d\s+73%/, "top table shows both 5h and 7d percentages");
+assert.match(wideAccountsText, /5h 100%\s+·\s+7d 耗尽/, "top table distinguishes 7d exhaustion");
+assert.match(wideAccountsText, /5h 耗尽.*7d\s+88%/, "top table distinguishes 5h exhaustion");
+assert.match(wideAccountsText, /Gemini 4 Argon\s+7d 额度/, "detail view does not truncate Gemini 4 Argon and unifies window label");
+assert.match(wideAccountsText, /积分/, "credits column appears when at least one account has credits");
+assert.doesNotMatch(wideAccountsText, /\d+[mh]\s*后重置|\d+s\s*前|\d+\s*天\s*\d+h/, "no mixed English unit + Chinese text");
+accountsComp.handleInput("q");
+
+// When no account has credits, hide empty credits column
+recordAccountUsage("first@gmail.com", {
+  fetchedAt: now - 35_000,
+  planLabel: "Google AI Ultra",
+  pools: {
+    gemini: { remaining: 0.15, remaining5h: 0.15, remainingWeekly: 0.73 },
+    claude_gpt: { remaining: 0.12, remaining5h: 0.12, remainingWeekly: 0.56 },
+  },
+});
+const noCreditsComp = new AntigravityConsole(
+  fakePi,
+  fakeCtx,
+  { requestRender: () => {}, terminal: { rows: 28, columns: 140 } },
+  fakeTheme,
+  fakeKb,
+  () => {},
+  { initialTab: "accounts" },
+);
+const noCreditsText = noCreditsComp.render(140).join("\n");
+assert.doesNotMatch(noCreditsText, /顺序\s+账号.*积分/, "hide empty credits column when no account reports credits");
+noCreditsComp.handleInput("q");
+
+// Chinese duration formatter checks
+assert.equal(formatCountdown(now + 45_000, now), "45秒");
+assert.equal(formatCountdown(now + (3 * 3600 + 8 * 60) * 1000, now), "3时08分");
+assert.equal(formatCountdown(now + (3 * 24 + 18) * 3600_000, now), "3天18时");
+assert.equal(formatRelativeAge(now - 35_000, now), "35 秒前");
+assert.equal(formatResetIso(new Date(now + (3 * 24 + 19) * 3600_000).toISOString(), now), "3 天 19 小时后重置");
+assert.equal(formatResetIso(new Date(now - 120_000).toISOString(), now), "应已重置");
+
 // 5. Plain text formatters
 const plain = formatAccountsPlainText(listAccounts(), saveAntigravitySettings({}));
 assert.match(plain, /fir\*\*\*@gmail\.com|sec\*\*\*@gmail\.com/);
+assert.match(plain, /5h 15% · 7d 73%/);
+assert.match(plain, /7d 耗尽/);
 const plainModels = formatModelsPlainText(catalog.models, catalog.routing);
 assert.match(plainModels, /GPT-OSS 120B/);
 const plainDiag = formatDiagnosticsPlainText(listAccounts(), catalog.models.length, {}, saveAntigravitySettings({}));

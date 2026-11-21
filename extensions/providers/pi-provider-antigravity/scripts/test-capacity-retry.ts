@@ -11,6 +11,7 @@ import {
   streamAntigravity,
 } from "../src/stream/stream.js";
 import { ANTIGRAVITY_MODELS } from "../src/models/index.js";
+import { promoteAccountToPrimary, rememberAccount } from "../src/auth/accounts.js";
 
 const isolatedHome = mkdtempSync(join(tmpdir(), "antigravity-capacity-test-"));
 const savedFetch = globalThis.fetch;
@@ -186,7 +187,52 @@ try {
   assert.ok(quotaCalls <= 2, `a quota wall is not retried across the ladder (calls=${quotaCalls})`);
 
   assert.equal(isGenericResourceExhausted("Resource has been exhausted (e.g. check quota)."), true);
+
+  // Multi-account capacity failover: switches to healthy second account after 1 short retry
+  // instead of burning through the full 5-attempt ladder on the first congested account.
+  clearCapacityRouteCache();
+  process.env.PI_CODING_AGENT_DIR = join(isolatedHome, "agent");
+  const { mkdirSync } = await import("node:fs");
+  mkdirSync(process.env.PI_CODING_AGENT_DIR, { recursive: true });
+  process.env.ANTIGRAVITY_CAPACITY_BACKOFF_MS = "1,1,1,1";
+  rememberAccount({
+    email: "cap-first@gmail.com",
+    access: "cap-tok-1",
+    refresh: "cap-ref-1",
+    expires: Date.now() + 3600_000,
+    projectId: "p-1",
+  });
+  rememberAccount({
+    email: "cap-second@gmail.com",
+    access: "cap-tok-2",
+    refresh: "cap-ref-2",
+    expires: Date.now() + 3600_000,
+    projectId: "p-2",
+  });
+  await promoteAccountToPrimary("cap-first@gmail.com");
+  const seenTokens: string[] = [];
+  globalThis.fetch = (async (_url, init) => {
+    const auth = (init?.headers as Record<string, string> | undefined)?.Authorization ?? "";
+    const tok = auth.replace(/^Bearer\s+/i, "");
+    seenTokens.push(tok);
+    if (tok === "cap-tok-1") {
+      return new Response(GENERIC_429, { status: 429 });
+    }
+    return new Response(OK_STREAM);
+  }) as typeof fetch;
+  const multiRecovered = await streamAntigravity(model, { messages: [] }, {
+    apiKey: JSON.stringify({ token: "cap-tok-1", projectId: "p-1" }),
+    sessionId: "cap-multi",
+  }).result();
+  assert.equal(multiRecovered.stopReason, "stop", multiRecovered.errorMessage);
+  assert.ok(seenTokens.includes("cap-tok-2"), "should fail over to second healthy account");
+  const firstAcctHits = seenTokens.filter((t) => t === "cap-tok-1").length;
+  assert.ok(
+    firstAcctHits < 5 * 8,
+    `expected failover after 2 passes on first account, not full 5-attempt ladder (hits=${firstAcctHits})`,
+  );
 } finally {
+  delete process.env.PI_CODING_AGENT_DIR;
   restoreEnv();
 }
 

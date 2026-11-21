@@ -134,7 +134,7 @@ export function formatCountdown(targetMs: number, now = Date.now(), estimated = 
   if (delta <= 0) return "即将恢复";
   const prefix = estimated ? "≈" : "";
   const totalSec = Math.ceil(delta / 1000);
-  if (totalSec < 60) return `${prefix}${totalSec}s`;
+  if (totalSec < 60) return `${prefix}${totalSec}秒`;
   const totalMin = Math.floor(totalSec / 60);
   const sec = totalSec % 60;
   if (totalMin < 60) {
@@ -143,27 +143,46 @@ export function formatCountdown(targetMs: number, now = Date.now(), estimated = 
   const totalHours = Math.floor(totalMin / 60);
   const mins = totalMin % 60;
   if (totalHours < 24) {
-    return `${prefix}${totalHours}h${String(mins).padStart(2, "0")}m`;
+    return `${prefix}${totalHours}时${String(mins).padStart(2, "0")}分`;
   }
   const days = Math.floor(totalHours / 24);
   const hours = totalHours % 24;
-  return `${prefix}${days}d${hours}h`;
+  return hours > 0 ? `${prefix}${days}天${hours}时` : `${prefix}${days}天`;
+}
+
+export function formatCompactDuration(targetMs: number, now = Date.now()): string {
+  const delta = Math.max(0, targetMs - now);
+  if (delta <= 0) return "即将重置";
+  const totalMin = Math.max(1, Math.round(delta / 60_000));
+  if (totalMin < 60) return `${totalMin}分`;
+  const totalHours = Math.floor(totalMin / 60);
+  const mins = totalMin % 60;
+  if (totalHours < 24) {
+    return mins > 0 ? `${totalHours}时${String(mins).padStart(2, "0")}分` : `${totalHours}时`;
+  }
+  const days = Math.floor(totalHours / 24);
+  const hours = totalHours % 24;
+  return hours > 0 ? `${days}天${hours}时` : `${days}天`;
 }
 
 export function formatResetIso(resetIso: string | undefined, now = Date.now()): string {
   if (!resetIso) return "未知";
   const ts = Date.parse(resetIso);
   if (!Number.isFinite(ts)) return resetIso;
-  if (ts <= now) return "即将重置";
+  if (ts <= now) return now - ts > 60_000 ? "应已重置" : "即将重置";
   const delta = ts - now;
   const totalMin = Math.round(delta / 60_000);
-  if (totalMin < 60) return `${Math.max(1, totalMin)}m 后重置`;
+  if (totalMin < 60) return `${Math.max(1, totalMin)} 分钟后重置`;
   const totalHours = Math.floor(totalMin / 60);
   const mins = totalMin % 60;
-  if (totalHours < 24) return `${totalHours}h${String(mins).padStart(2, "0")}m 后重置`;
+  if (totalHours < 24) {
+    return mins > 0
+      ? `${totalHours} 小时 ${String(mins).padStart(2, "0")} 分后重置`
+      : `${totalHours} 小时后重置`;
+  }
   const days = Math.floor(totalHours / 24);
   const hours = totalHours % 24;
-  return hours > 0 ? `${days} 天 ${hours}h 后重置` : `${days} 天后重置`;
+  return hours > 0 ? `${days} 天 ${hours} 小时后重置` : `${days} 天后重置`;
 }
 
 export function formatClockTime(ts: number): string {
@@ -175,7 +194,7 @@ export function formatRelativeAge(ts: number | undefined, now = Date.now()): str
   if (!ts) return "未同步";
   const sec = Math.max(0, Math.floor((now - ts) / 1000));
   if (sec < 10) return "刚刚";
-  if (sec < 60) return `${sec}s 前`;
+  if (sec < 60) return `${sec} 秒前`;
   const min = Math.floor(sec / 60);
   if (min < 60) return `${min} 分钟前`;
   const hrs = Math.floor(min / 60);
@@ -216,6 +235,28 @@ export function renderQuotaBar(
   return `${theme.fg(color, filledStr)}${theme.fg("borderMuted", emptyStr)}`;
 }
 
+function styleQuotaPct(
+  theme: Theme,
+  frac: number,
+  padWidth: number,
+  dimmed: boolean,
+): string {
+  const pctNum = Math.round(frac * 100);
+  const numStr = padWidth > 0 ? String(pctNum).padStart(padWidth) : String(pctNum);
+  const pctText = `${numStr}%`;
+  if (dimmed) return theme.fg("dim", pctText);
+  if (frac < 0.2) return theme.fg("error", pctText);
+  if (frac < 0.5) return theme.fg("warning", pctText);
+  return `${theme.fg("text", numStr)}${theme.fg("dim", "%")}`;
+}
+
+function compactWindowReset(resetIso: string | undefined, now: number): string {
+  if (!resetIso) return "";
+  const ts = Date.parse(resetIso);
+  if (!Number.isFinite(ts) || ts <= now) return "";
+  return ` ${formatCompactDuration(ts, now)}`;
+}
+
 export function renderPoolCell(
   theme: Theme,
   g: Glyphs,
@@ -228,43 +269,110 @@ export function renderPoolCell(
 ): string {
   const cd = account.poolCooldowns[pool];
   const dimmed = !account.enabled;
+  const quota = account.cachedUsage?.pools[pool];
+  const q5 = quota?.remaining5h;
+  const q7 = quota?.remainingWeekly;
+  const qAny = quota?.remaining;
+
   if (cd && cd.until > now) {
-    const label = `${g.cooling} ${formatCountdown(cd.until, now, cd.estimated)}`;
-    const content = loadingFrame ? `${theme.fg("muted", loadingFrame)} ${label}` : label;
+    const cdTxt = formatCountdown(cd.until, now, cd.estimated);
+    if (cellWidth >= 20) {
+      const base = `${g.cooling} ${cdTxt}`;
+      const spin = loadingFrame ? `${theme.fg("muted", loadingFrame)} ` : "";
+      const summary = [
+        q5 !== undefined ? (q5 <= 0 ? "5h耗尽" : `5h${Math.round(q5 * 100)}%`) : "",
+        q7 !== undefined ? (q7 <= 0 ? "7d耗尽" : `7d${Math.round(q7 * 100)}%`) : "",
+      ]
+        .filter(Boolean)
+        .join("/");
+      if (summary && visibleWidth(`${loadingFrame ? `${loadingFrame} ` : ""}${base} · ${summary}`) <= cellWidth) {
+        return padRight(
+          `${spin}${theme.fg(dimmed ? "dim" : "warning", base)} ${theme.fg("dim", `· ${summary}`)}`,
+          cellWidth,
+        );
+      }
+      const fullLabel = `${g.cooling} 冷却 ${cdTxt}`;
+      const label = visibleWidth(fullLabel) <= cellWidth ? fullLabel : base;
+      return theme.fg(dimmed ? "dim" : "warning", padRight(`${spin}${label}`, cellWidth));
+    }
+    const content = loadingFrame ? `${loadingFrame} ${g.cooling}${cdTxt}` : `${g.cooling}${cdTxt}`;
     return theme.fg(dimmed ? "dim" : "warning", padRight(content, cellWidth));
   }
-  const quota = account.cachedUsage?.pools[pool];
-  const frac = quota?.remaining ?? quota?.remaining5h ?? quota?.remainingWeekly;
-  if (account.cachedUsage?.error && frac === undefined) {
-    return theme.fg("error", padRight(`${g.warn} 拉取失败`, cellWidth));
+
+  if (account.cachedUsage?.error && q5 === undefined && q7 === undefined && qAny === undefined) {
+    const errTxt = cellWidth >= 12 ? `${g.warn} 拉取失败` : `${g.warn} 失败`;
+    return theme.fg("error", padRight(errTxt, cellWidth));
   }
-  if (frac === undefined) {
+  if (q5 === undefined && q7 === undefined && qAny === undefined) {
     if (loadingFrame) return theme.fg("accent", padRight(loadingFrame, cellWidth));
     return theme.fg("dim", padRight("—", cellWidth));
   }
-  if (frac <= 0) {
-    const reset = quota?.resetTime ? ` · ${formatCountdown(Date.parse(quota.resetTime), now)}` : "";
-    return theme.fg(dimmed ? "dim" : "error", padRight(`耗尽${reset}`, cellWidth));
+
+  if (q5 !== undefined && q7 !== undefined) {
+    const spin = loadingFrame ? `${theme.fg("accent", loadingFrame)} ` : "";
+    if (cellWidth < 20) {
+      const p5 = q5 <= 0 ? theme.fg(dimmed ? "dim" : "error", "5h耗尽") : `${theme.fg("dim", "5h")}${styleQuotaPct(theme, q5, 0, dimmed)}`;
+      const p7 = q7 <= 0 ? theme.fg(dimmed ? "dim" : "error", "7d耗尽") : `${theme.fg("dim", "7d")}${styleQuotaPct(theme, q7, 0, dimmed)}`;
+      return padRight(`${p5}${theme.fg("dim", "/")}${p7}`, cellWidth);
+    }
+
+    const sep = theme.fg("dim", " · ");
+    const tag5 = theme.fg(dimmed ? "dim" : "muted", "5h");
+    const tag7 = theme.fg(dimmed ? "dim" : "muted", "7d");
+    const errColor = dimmed ? "dim" : "error";
+
+    if (q5 <= 0 && q7 <= 0) {
+      const rst7 = compactWindowReset(quota?.resetWeekly ?? quota?.resetTime, now);
+      const withReset = `${spin}${theme.fg(errColor, "5h 耗尽")}${sep}${theme.fg(errColor, `7d 耗尽${rst7}`)}`;
+      if (visibleWidth(withReset) <= cellWidth) return padRight(withReset, cellWidth);
+      return padRight(`${spin}${theme.fg(errColor, "5h 耗尽")}${sep}${theme.fg(errColor, "7d 耗尽")}`, cellWidth);
+    }
+    if (q5 <= 0) {
+      const rst5 = compactWindowReset(quota?.reset5h ?? quota?.resetTime, now);
+      const withReset = `${spin}${theme.fg(errColor, `5h 耗尽${rst5}`)}${sep}${tag7} ${styleQuotaPct(theme, q7, 3, dimmed)}`;
+      if (visibleWidth(withReset) <= cellWidth) return padRight(withReset, cellWidth);
+      const tightPct = `${spin}${theme.fg(errColor, `5h 耗尽${rst5}`)}${sep}${tag7} ${styleQuotaPct(theme, q7, 0, dimmed)}`;
+      if (visibleWidth(tightPct) <= cellWidth) return padRight(tightPct, cellWidth);
+      return padRight(`${spin}${theme.fg(errColor, "5h 耗尽")}${sep}${tag7} ${styleQuotaPct(theme, q7, 3, dimmed)}`, cellWidth);
+    }
+    if (q7 <= 0) {
+      const rst7 = compactWindowReset(quota?.resetWeekly ?? quota?.resetTime, now);
+      const withReset = `${spin}${tag5} ${styleQuotaPct(theme, q5, 3, dimmed)}${sep}${theme.fg(errColor, `7d 耗尽${rst7}`)}`;
+      if (visibleWidth(withReset) <= cellWidth) return padRight(withReset, cellWidth);
+      const tightPct = `${spin}${tag5} ${styleQuotaPct(theme, q5, 0, dimmed)}${sep}${theme.fg(errColor, `7d 耗尽${rst7}`)}`;
+      if (visibleWidth(tightPct) <= cellWidth) return padRight(tightPct, cellWidth);
+      return padRight(`${spin}${tag5} ${styleQuotaPct(theme, q5, 3, dimmed)}${sep}${theme.fg(errColor, "7d 耗尽")}`, cellWidth);
+    }
+
+    const paddedDual = `${spin}${tag5} ${styleQuotaPct(theme, q5, 3, dimmed)}${sep}${tag7} ${styleQuotaPct(theme, q7, 3, dimmed)}`;
+    if (visibleWidth(paddedDual) <= cellWidth) return padRight(paddedDual, cellWidth);
+    return padRight(
+      `${spin}${tag5} ${styleQuotaPct(theme, q5, 0, dimmed)}${sep}${tag7} ${styleQuotaPct(theme, q7, 0, dimmed)}`,
+      cellWidth,
+    );
   }
 
-  const pctNum = Math.round(frac * 100);
-  const pctText = `${String(pctNum).padStart(3)}%`;
-  const pctStyled = dimmed
-    ? theme.fg("dim", pctText)
-    : frac < 0.2
-      ? theme.fg("error", pctText)
-      : frac < 0.5
-        ? theme.fg("warning", pctText)
-        : `${theme.fg("text", String(pctNum).padStart(3))}${theme.fg("dim", "%")}`;
+  const singleFrac = q5 ?? q7 ?? qAny!;
+  const singleTag = q5 !== undefined ? "5h" : q7 !== undefined ? "7d" : "";
+  const singleResetIso =
+    q5 !== undefined ? quota?.reset5h ?? quota?.resetTime : q7 !== undefined ? quota?.resetWeekly ?? quota?.resetTime : quota?.resetTime;
+  const spin = loadingFrame ? `${theme.fg("accent", loadingFrame)} ` : "";
 
-  if (barWidth <= 0) {
-    const spin = loadingFrame ? `${theme.fg("muted", loadingFrame)} ` : "";
-    return padRight(`${spin}${pctStyled}`, cellWidth);
+  if (singleFrac <= 0) {
+    const prefix = singleTag ? `${singleTag} 耗尽` : "耗尽";
+    const rst = compactWindowReset(singleResetIso, now);
+    const full = rst ? `${prefix}${rst}` : prefix;
+    const text = visibleWidth(`${spin}${full}`) <= cellWidth ? full : prefix;
+    return theme.fg(dimmed ? "dim" : "error", padRight(`${spin}${text}`, cellWidth));
   }
 
-  const bar = renderQuotaBar(theme, g, frac, barWidth, dimmed || Boolean(loadingFrame));
-  const spin = loadingFrame ? theme.fg("accent", `${loadingFrame} `) : "";
-  return padRight(`${spin}${bar} ${pctStyled}`, cellWidth);
+  const pctStyled = styleQuotaPct(theme, singleFrac, cellWidth >= 20 ? 3 : 0, dimmed);
+  const tagPrefix = singleTag ? `${theme.fg(dimmed ? "dim" : "muted", singleTag)} ` : "";
+  if (barWidth <= 0 || cellWidth < 20) {
+    return padRight(`${spin}${tagPrefix}${pctStyled}`, cellWidth);
+  }
+  const bar = renderQuotaBar(theme, g, singleFrac, barWidth, dimmed || Boolean(loadingFrame));
+  return padRight(`${spin}${tagPrefix}${bar} ${pctStyled}`, cellWidth);
 }
 
 export function renderRoundedFrame(
@@ -335,7 +443,17 @@ export function formatAccountsPlainText(
   now = Date.now(),
 ): string {
   if (!accounts.length) return "未绑定 Antigravity 账号，请运行 /login antigravity 登录。";
-  const headers = ["#", "账号", "套餐", "状态", "Gemini", "Claude/GPT", "积分"];
+  const hasCredits = accounts.some((a) => a.cachedUsage?.credits !== undefined);
+  const headers = hasCredits
+    ? ["#", "账号", "套餐", "状态", "Gemini", "Claude/GPT", "积分"]
+    : ["#", "账号", "套餐", "状态", "Gemini", "Claude/GPT"];
+  const fmtWindow = (label: string, frac: number, resetIso?: string): string => {
+    if (frac <= 0) {
+      const rst = compactWindowReset(resetIso, now);
+      return `${label} 耗尽${rst}`;
+    }
+    return `${label} ${Math.round(frac * 100)}%`;
+  };
   const rows = accounts.map((acc, i) => {
     const st = accountStatusText(acc, now);
     const badge = tierBadge(acc.planLabel).label;
@@ -343,23 +461,28 @@ export function formatAccountsPlainText(
       const cd = acc.poolCooldowns[pool];
       if (cd && cd.until > now) return `冷却 ${formatCountdown(cd.until, now, cd.estimated)}`;
       const q = acc.cachedUsage?.pools[pool];
-      const frac = q?.remaining ?? q?.remaining5h ?? q?.remainingWeekly;
-      if (frac === undefined) return "-";
-      const pct = `${Math.round(frac * 100)}%`;
-      const rst = q?.resetTime ? ` ↻${formatCountdown(Date.parse(q.resetTime), now)}` : "";
-      return `${pct}${rst}`;
+      const q5 = q?.remaining5h;
+      const q7 = q?.remainingWeekly;
+      if (q5 !== undefined && q7 !== undefined) {
+        return `${fmtWindow("5h", q5, q?.reset5h ?? q?.resetTime)} · ${fmtWindow("7d", q7, q?.resetWeekly ?? q?.resetTime)}`;
+      }
+      if (q5 !== undefined) return fmtWindow("5h", q5, q?.reset5h ?? q?.resetTime);
+      if (q7 !== undefined) return fmtWindow("7d", q7, q?.resetWeekly ?? q?.resetTime);
+      if (q?.remaining !== undefined) return fmtWindow("额度", q.remaining, q.resetTime);
+      return "-";
     };
-    const credits =
-      acc.cachedUsage?.credits !== undefined ? acc.cachedUsage.credits.toLocaleString() : "-";
-    return [
+    const base = [
       acc.enabled ? String(i + 1) : "-",
       maskEmailAddress(acc.email, settings.maskEmails),
       badge,
       st.text,
       fmtPool("gemini"),
       fmtPool("claude_gpt"),
-      credits,
     ];
+    if (hasCredits) {
+      base.push(acc.cachedUsage?.credits !== undefined ? acc.cachedUsage.credits.toLocaleString() : "-");
+    }
+    return base;
   });
   return renderPlainTable(headers, rows);
 }
