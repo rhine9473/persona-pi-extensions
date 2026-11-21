@@ -43,6 +43,19 @@ const openpi = {
   'windows-terminal-compat': '处理 Windows 终端内容收缩时的残影和重绘问题。',
   workflows: '编排多阶段、并行的子 Agent 工作流，查看运行状态、结果与产物。',
 };
+const persona = {
+  'extensions/ui/pi-ui-tool-fold.ts': '把单次回复里的全部工具调用折叠成全宽透明圆角框，展示状态、目标、输出行数和耗时；按 Ctrl+O 展开完整详情。',
+  'extensions/ui/pi-ui-user-card.ts': '把用户已发送消息的深蓝底条改成透明紫色 1px 圆角卡片（╭─ ❯ ─╮），透出终端毛玻璃效果。',
+  'extensions/ui/pi-ui-extension-manager/index.ts': '通过 /extension-manager 打开全屏中文管理器，集中浏览、搜索、启停、更新和卸载扩展与包。',
+  'extensions/ui/pi-ui-smart-models.ts': '通过 /models、/m 或 Alt+M 按真实上游分组搜索和切换模型，自动记忆每个模型的思考等级。',
+  'extensions/ui/pi-ui-sessions/index.ts': '通过 /sessions 打开双栏历史会话浏览器，支持实时对话与代码变更预览、删会话、切工作区和子代理。',
+  'extensions/ui/pi-ui-turn-time.ts': '在每轮回答结束后显示极简全宽细分割线与总耗时（如 ── ✓ 耗时 1m24s ──）。',
+  'extensions/ui/pi-ui-input-fold.ts': '自动折叠终端里过长的粘贴日志和代码，防止刷屏；模型仍会收到完整原文。',
+  'extensions/ui/pi-ui-image-paste/index.ts': '优化图片粘贴与附件提示，把临时图片路径显示为简洁占位，并方便查看和管理附件。',
+  'extensions/tools/pi-tool-subagents/index.ts': '通过 /subagents、/btw 和后台子代理工具并发分派独立任务，支持进度追踪与结果自动回传。',
+  'extensions/tools/pi-tool-bash-timeout.ts': '为非交互/子代理会话里未指定超时的 Bash 命令设置 120 秒上限，防止任务无限挂死。',
+  'extensions/providers/pi-provider-antigravity/src/index.ts': '接入 Google Antigravity OAuth 模型通道，提供 /agy 控制台、5h/7d 额度看板与多账号智能切换。',
+};
 
 function readHead(file) {
   let fd;
@@ -100,6 +113,17 @@ export function resourceDescription(resource, agentDir) {
     const relative = path.relative(resource.metadata.packageRoot ?? resource.metadata.baseDir ?? '', resource.path).split(path.sep).join('/');
     const match = /^extensions\/([^/]+)\/index\.[jt]s$/.exec(relative);
     if (match && openpi[match[1]]) return openpi[match[1]];
+  }
+  if (
+    /^(?:git:github\.com\/|https:\/\/github\.com\/)rhine9473\/persona-pi-extensions(?:\.git)?(?:@[^\s]+)?$/i.test(
+      resource.metadata.source,
+    )
+  ) {
+    const relative = path
+      .relative(resource.metadata.packageRoot ?? resource.metadata.baseDir ?? '', resource.path)
+      .split(path.sep)
+      .join('/');
+    if (persona[relative]) return persona[relative];
   }
   const documented = documentedDescription(resource.path);
   if (documented) return documented;

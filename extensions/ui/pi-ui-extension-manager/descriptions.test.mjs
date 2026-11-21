@@ -42,6 +42,16 @@ test('known OpenPI description is specific to repository and entry; other packag
   assert.equal(resourceDescription(f.resource(file, { ...metadata, source: 'git:github.com/other/tools' }), f.agent), '另一个包自己的功能。');
 });
 
+test('persona-pi-extensions entries show concise Chinese descriptions', (t) => {
+  const f = fixture(t);
+  const root = path.join(f.agent, 'persona');
+  const file = path.join(root, 'extensions/providers/pi-provider-antigravity/src/index.ts');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, 'export default () => {}');
+  const metadata = { origin: 'package', source: 'git:github.com/rhine9473/persona-pi-extensions', packageRoot: root };
+  assert.match(resourceDescription(f.resource(file, metadata), f.agent), /Antigravity/);
+});
+
 test('missing or malformed docs fall back honestly; license headers are not function descriptions', (t) => {
   const f = fixture(t); const root = path.join(f.extensions, 'unknown'); fs.mkdirSync(root);
   const file = path.join(root, 'index.ts');

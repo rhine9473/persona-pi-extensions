@@ -50,7 +50,20 @@ export function createProvenanceReader() {
       const root = resource.metadata.packageRoot ?? (leaf === 'index.ts' || leaf === 'index.js' ? path.dirname(resource.path) : undefined);
       const result = info(resource.metadata.source, root, builtin);
       let name = builtin ? resource.path : /^index\.[jt]s$/.test(leaf) ? path.basename(path.dirname(resource.path)) : leaf;
-      if (['dist', 'src', 'lib', 'build'].includes(name) && result.packageName) name = result.packageName;
+      if (['dist', 'src', 'lib', 'build'].includes(name)) {
+        const parentDir = path.dirname(path.dirname(resource.path));
+        const parentName = path.basename(parentDir);
+        const packageRoot = resource.metadata.packageRoot ? path.resolve(resource.metadata.packageRoot) : '';
+        if (
+          parentName &&
+          (!packageRoot || path.resolve(parentDir) !== packageRoot) &&
+          !['extensions', 'providers', 'tools', 'ui'].includes(parentName)
+        ) {
+          name = parentName;
+        } else if (result.packageName) {
+          name = result.packageName;
+        }
+      }
       return { ...result, name };
     },
   };

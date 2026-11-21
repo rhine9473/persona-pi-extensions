@@ -40,6 +40,8 @@ test('generic dist entry uses package identity; local files and builtins keep ho
   assert.equal(reader.resource(resource).name, 'pi-sync'); assert.equal(reader.resource(resource).group, 'narumiruna');
   const extensions = path.join(root, 'extensions'); fs.mkdirSync(extensions);
   fs.writeFileSync(path.join(extensions, 'package.json'), JSON.stringify({ author: 'Collection owner' }));
+  const nested = { path: path.join(a.installedPath, 'extensions/providers/pi-provider-antigravity/src/index.ts'), metadata: { origin: 'package', source: a.source, packageRoot: a.installedPath } };
+  assert.equal(reader.resource(nested).name, 'pi-provider-antigravity');
   const local = reader.resource({ path: path.join(extensions, 'loose.ts'), metadata: { source: 'auto' } });
   assert.equal(local.group, '本地扩展（作者未标注）'); assert.equal(local.groupOrder, 0);
   const builtin = reader.resource({ path: 'builtin:mcp', metadata: { source: 'builtin' } });
