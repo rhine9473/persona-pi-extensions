@@ -2359,6 +2359,7 @@ export function streamAntigravity(
           } else if (response?.status === 401) {
             failoverOpts = {
               pool,
+              modelId: model.id,
               failedToken: creds.token,
               authStatus: "needs_reauth",
               authError: friendly,
@@ -2366,13 +2367,35 @@ export function streamAntigravity(
             };
           } else if (response?.status === 403) {
             const verifyUrl = extractValidationUrl(lastText);
+            const tierRestricted =
+              !verifyUrl &&
+              /Ultra plan|available to .* subscribers|not enabled for|does not have access/i.test(
+                lastText,
+              );
+            failoverOpts = tierRestricted
+              ? {
+                  pool,
+                  modelId: model.id,
+                  failedToken: creds.token,
+                  preserveActiveAccount: true,
+                  reason: "当前账号无权访问该模型，切换账号重试",
+                }
+              : {
+                  pool,
+                  modelId: model.id,
+                  failedToken: creds.token,
+                  authStatus: verifyUrl ? "needs_verify" : "disabled",
+                  authError: friendly,
+                  verifyUrl,
+                  reason: verifyUrl ? "需要账号验证 (403)" : "账号被限制或停用 (403)",
+                };
+          } else if (response?.status === 404) {
             failoverOpts = {
               pool,
+              modelId: model.id,
               failedToken: creds.token,
-              authStatus: verifyUrl ? "needs_verify" : "disabled",
-              authError: friendly,
-              verifyUrl,
-              reason: verifyUrl ? "需要账号验证 (403)" : "账号被限制或停用 (403)",
+              preserveActiveAccount: true,
+              reason: "当前账号未开通该模型，尝试其他账号",
             };
           }
 
@@ -2419,6 +2442,7 @@ export function streamAntigravity(
             if (!exhaustedAccountFailover && (capacityAttempt >= 2 || capacityAttempt >= capacityAttempts - 1)) {
               const next = await failoverToNextAccount(triedAccessTokens, {
                 pool,
+                modelId: model.id,
                 failedToken: creds.token,
                 cooldownUntil: Date.now() + 60_000,
                 cooldownEstimated: true,

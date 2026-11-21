@@ -127,10 +127,10 @@ export const RUNTIME_MAX_OUTPUT_TOKENS: Record<string, number> = {
   "gemini-4-argon-low": 65536,
   "gemini-4-argon-medium": 65536,
   "gemini-4-argon-high": 65536,
-  "gemini-4-carbon": 65536,
-  "gemini-4-carbon-low": 65536,
-  "gemini-4-carbon-medium": 65536,
-  "gemini-4-carbon-high": 65536,
+  "gemini-4-carbon": 262144,
+  "gemini-4-carbon-low": 262144,
+  "gemini-4-carbon-medium": 262144,
+  "gemini-4-carbon-high": 262144,
   "gemini-4-hydrogen": 262144,
   "gemini-4-hydrogen-low": 262144,
   "gemini-4-hydrogen-medium": 262144,
@@ -187,7 +187,11 @@ export function getMaxOutputTokens(modelId: string, runtimeModel?: string): numb
     if (/^claude-(?:opus|sonnet)-5-/i.test(runtimeModel)) return 128000;
     if (runtimeModel.startsWith("claude-")) return 64000;
     if (runtimeModel.startsWith("gpt-oss-")) return 32768;
-    if (runtimeModel.startsWith("gemini-4-neon") || runtimeModel.startsWith("gemini-4-hydrogen"))
+    if (
+      runtimeModel.startsWith("gemini-4-neon") ||
+      runtimeModel.startsWith("gemini-4-hydrogen") ||
+      runtimeModel.startsWith("gemini-4-carbon")
+    )
       return 262144;
     if (runtimeModel.startsWith("gemini-3.1-pro") || runtimeModel === "gemini-pro-agent")
       return 65535;

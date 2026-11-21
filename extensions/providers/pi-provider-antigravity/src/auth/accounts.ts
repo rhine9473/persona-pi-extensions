@@ -31,6 +31,7 @@ export type StoredAccount = AntigravityOAuthCredentials & {
   authStatus?: AccountAuthStatus;
   authError?: string;
   verifyUrl?: string;
+  availableModels?: string[];
   poolCooldowns?: Partial<Record<QuotaPoolKey, AccountCooldown>>;
   cachedUsage?: CachedAccountUsage;
 };
@@ -52,12 +53,14 @@ export type AccountSummary = {
   authStatus: AccountAuthStatus;
   authError?: string;
   verifyUrl?: string;
+  availableModels?: string[];
   poolCooldowns: Partial<Record<QuotaPoolKey, AccountCooldown>>;
   cachedUsage?: CachedAccountUsage;
 };
 
 export type FailoverOptions = {
   pool?: QuotaPoolKey;
+  modelId?: string;
   reason?: string;
   failedToken?: string;
   cooldownUntil?: number;
@@ -438,6 +441,7 @@ export function listAccounts(): AccountSummary[] {
     authStatus: account.authStatus ?? "ready",
     authError: account.authError,
     verifyUrl: account.verifyUrl,
+    availableModels: account.availableModels ? [...account.availableModels] : undefined,
     poolCooldowns: { ...(account.poolCooldowns ?? {}) },
     cachedUsage: account.cachedUsage,
   }));
@@ -632,6 +636,56 @@ export function markAccountAuthFailure(
   notifyAccountsChanged();
 }
 
+export function recordAccountAvailableModels(selectorOrToken: string, modelIds: string[]): void {
+  const store = loadAccountStore();
+  const resolvedId = findAccountId(store, selectorOrToken);
+  const acc =
+    store.accounts[selectorOrToken] ??
+    findAccountByToken(store, selectorOrToken) ??
+    (resolvedId ? store.accounts[resolvedId] : undefined);
+  if (!acc) return;
+  const normalized = [...new Set(modelIds.map((id) => id.trim()).filter(Boolean))].sort();
+  if (
+    acc.availableModels &&
+    acc.availableModels.length === normalized.length &&
+    acc.availableModels.every((v, idx) => v === normalized[idx])
+  ) {
+    return;
+  }
+  acc.availableModels = normalized;
+  saveAccountStore(store);
+}
+
+export async function listPeerDiscoveryCredentials(
+  token: string,
+  refresh?: string,
+): Promise<Array<{ accountId: string; token: string; projectId: string }>> {
+  const store = loadAccountStore();
+  const matched =
+    findAccountByToken(store, token) ??
+    (refresh ? Object.values(store.accounts).find((a) => a.refresh === refresh) : undefined);
+  if (!matched) return [];
+
+  const peers: Array<{ accountId: string; token: string; projectId: string }> = [];
+  for (const acc of sortedAccounts(store)) {
+    if (acc.accountId === matched.accountId) continue;
+    if (acc.enabled === false || (acc.authStatus ?? "ready") !== "ready") continue;
+    try {
+      const fresh = await ensureFresh(acc);
+      store.accounts[fresh.accountId] = fresh;
+      peers.push({
+        accountId: fresh.accountId,
+        token: fresh.access,
+        projectId: fresh.projectId || defaultProjectId(fresh.email || "antigravity-default"),
+      });
+    } catch {
+      // Skip peers whose refresh fails during catalog merge.
+    }
+  }
+  saveAccountStore(store);
+  return peers;
+}
+
 export function recordAccountUsage(selector: string, cachedUsage: CachedAccountUsage): void {
   const store = loadAccountStore();
   const id = findAccountId(store, selector);
@@ -712,13 +766,26 @@ export async function selectAccountForRequest(
 
   const authReady = enabled.filter((a) => (a.authStatus ?? "ready") === "ready");
   if (authReady.length === 0) {
+    const verifyAcc = enabled.find((a) => a.authStatus === "needs_verify");
+    if (verifyAcc) {
+      const link = verifyAcc.verifyUrl ? `（验证链接：${verifyAcc.verifyUrl}）` : "";
+      return {
+        kind: "none_available",
+        reason: `账号需要 Google 浏览器验证后才能继续使用${link}；验证完成后运行 /agy 按 r 刷新即可恢复`,
+      };
+    }
     return { kind: "none_available", reason: "没有可用的已授权账号，请重新登录" };
   }
 
-  const healthy = authReady.filter((a) => !isAccountCoolingForPool(a, pool, now));
+  const eligibleByModel = authReady.filter(
+    (a) => !a.availableModels || a.availableModels.includes(modelId),
+  );
+  const candidatePool = eligibleByModel.length > 0 ? eligibleByModel : authReady;
+
+  const healthy = candidatePool.filter((a) => !isAccountCoolingForPool(a, pool, now));
   if (healthy.length === 0) {
     let earliestUntil = Infinity;
-    for (const acc of authReady) {
+    for (const acc of candidatePool) {
       const cd = isAccountCoolingForPool(acc, pool, now);
       if (cd && cd.until < earliestUntil) earliestUntil = cd.until;
     }
@@ -734,6 +801,9 @@ export async function selectAccountForRequest(
   const currentActiveCooldown = currentActive
     ? isAccountCoolingForPool(currentActive, pool, now)
     : undefined;
+  const currentActiveIneligible = Boolean(
+    currentActive?.availableModels && !currentActive.availableModels.includes(modelId),
+  );
   let chosen: StoredAccount | undefined;
 
   if (settings.strategy === "sticky") {
@@ -764,7 +834,7 @@ export async function selectAccountForRequest(
       const temporaryBypass = Boolean(
         switched &&
           settings.strategy === "sticky" &&
-          currentActiveCooldown?.estimated === true &&
+          (currentActiveCooldown?.estimated === true || currentActiveIneligible) &&
           (currentActive?.authStatus ?? "ready") === "ready",
       );
       if (!temporaryBypass) {
@@ -844,13 +914,18 @@ export async function failoverToNextAccount(
     saveAccountStore(store);
   }
 
-  const candidates = sortedAccounts(store).filter((account) => {
+  const allReady = sortedAccounts(store).filter((account) => {
     if (account.enabled === false) return false;
     if ((account.authStatus ?? "ready") !== "ready") return false;
     if (triedAccessTokens.has(account.access)) return false;
     if (isAccountCoolingForPool(account, pool, now)) return false;
     return true;
   });
+  const modelId = opts.modelId;
+  const modelReady = modelId
+    ? allReady.filter((account) => !account.availableModels || account.availableModels.includes(modelId))
+    : allReady;
+  const candidates = modelReady.length > 0 ? modelReady : allReady;
 
   for (const candidate of candidates) {
     try {

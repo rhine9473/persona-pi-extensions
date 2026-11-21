@@ -6,7 +6,7 @@ import type {
   ModelsStoreEntry,
   RefreshModelsContext,
 } from "@earendil-works/pi-ai";
-import { getApiKey } from "../auth/index.js";
+import { getApiKey, listPeerDiscoveryCredentials, recordAccountAvailableModels } from "../auth/index.js";
 import { DEFAULT_ENDPOINT, fetchAvailableModelsCatalog, parseApiKey } from "../client/index.js";
 import { ANTIGRAVITY_API, type AntigravityModelConfig } from "../types/types.js";
 import { antigravityEnv, isRecord } from "../utils/util.js";
@@ -23,7 +23,7 @@ import {
 
 export const DEFAULT_CATALOG_REFRESH_INTERVAL_MS = 4 * 60 * 60 * 1000;
 export const ANTIGRAVITY_PERSIST_KEY = "pi-antigravity";
-export const CATALOG_SCHEMA_VERSION = 4;
+export const CATALOG_SCHEMA_VERSION = 5;
 
 type PersistedAntigravityCatalog = {
   catalog: AntigravityCatalog;
@@ -64,6 +64,7 @@ export function hydrateAntigravityCatalog(stored: unknown): number {
 export async function discoverAntigravityModels(
   apiKey: string,
   signal?: AbortSignal,
+  refreshToken?: string,
 ): Promise<AntigravityCatalog> {
   const creds = parseApiKey(apiKey);
   const available = await fetchAvailableModelsCatalog(creds.token, creds.projectId, signal);
@@ -72,7 +73,65 @@ export async function discoverAntigravityModels(
     throw new Error("Antigravity returned an empty or unrecognized model catalog");
   }
   registerDiscoveredModelEnums(models);
-  return buildAntigravityCatalog(models, fallbackCatalog(), available.data.agentModelSorts);
+  const primaryCatalog = buildAntigravityCatalog(
+    models,
+    fallbackCatalog(),
+    available.data.agentModelSorts,
+  );
+  recordAccountAvailableModels(
+    creds.token,
+    primaryCatalog.models.map((m) => m.id),
+  );
+
+  // Merge catalogs across other enabled ready accounts so subscription-gated models
+  // (e.g. Gemini 4 Carbon on an Ultra account) still appear when a Pro account is primary.
+  const peers = await listPeerDiscoveryCredentials(creds.token, refreshToken);
+  if (peers.length === 0) return primaryCatalog;
+
+  const mergedRawModels = { ...models };
+  const mergedSorts = Array.isArray(available.data.agentModelSorts)
+    ? [...available.data.agentModelSorts]
+    : [];
+  const peerResults = await Promise.allSettled(
+    peers.map(async (peer) => ({
+      peer,
+      res: await fetchAvailableModelsCatalog(peer.token, peer.projectId, signal),
+    })),
+  );
+  for (const outcome of peerResults) {
+    if (outcome.status !== "fulfilled") continue;
+    const { peer, res } = outcome.value;
+    const peerModels = res.data.models;
+    if (!peerModels || Object.keys(peerModels).length === 0) continue;
+    registerDiscoveredModelEnums(peerModels);
+    try {
+      const peerCatalog = buildAntigravityCatalog(
+        peerModels,
+        fallbackCatalog(),
+        res.data.agentModelSorts,
+      );
+      recordAccountAvailableModels(
+        peer.accountId,
+        peerCatalog.models.map((m) => m.id),
+      );
+    } catch {
+      // Ignore empty peer catalogs.
+    }
+    for (const [id, info] of Object.entries(peerModels)) {
+      if (!mergedRawModels[id] || mergedRawModels[id]?.disabled === true) {
+        mergedRawModels[id] = info;
+      }
+    }
+    if (Array.isArray(res.data.agentModelSorts)) {
+      mergedSorts.push(...res.data.agentModelSorts);
+    }
+  }
+
+  return buildAntigravityCatalog(
+    mergedRawModels,
+    fallbackCatalog(),
+    mergedSorts.length > 0 ? mergedSorts : undefined,
+  );
 }
 
 export async function refreshAntigravityModels(
@@ -87,13 +146,14 @@ export async function refreshAntigravityModels(
 
   // A different account/project or pre-upgrade cache must not suppress a fresh
   // discovery. Keep hydration above so offline startup still has usable models.
+  const parsedPrimary = parseApiKey(apiKey);
+  const refreshTok = context.credential?.type === "oauth" ? context.credential.refresh : undefined;
+  const peerIds = (await listPeerDiscoveryCredentials(parsedPrimary.token, refreshTok))
+    .map((p) => p.accountId)
+    .sort();
+  const keyParts = [refreshTok ?? apiKey, parsedPrimary.projectId, ...(peerIds.length > 0 ? [peerIds] : [])];
   const credentialKey = createHash("sha256")
-    .update(
-      JSON.stringify([
-        context.credential?.type === "oauth" ? context.credential.refresh : apiKey,
-        parseApiKey(apiKey).projectId,
-      ]),
-    )
+    .update(JSON.stringify(keyParts))
     .digest("hex");
   const stored: unknown = context.stored;
   const persisted = isRecord(stored) ? stored[ANTIGRAVITY_PERSIST_KEY] : undefined;
@@ -113,7 +173,7 @@ export async function refreshAntigravityModels(
   }
 
   try {
-    const discovered = await discoverAntigravityModels(apiKey, context.signal);
+    const discovered = await discoverAntigravityModels(apiKey, context.signal, refreshTok);
     if (context.signal.aborted) return current.models;
     const next = resolvedCatalog(discovered, current);
     if (next.models.length > 0 && discovered.models.length > 0) {

@@ -9,8 +9,10 @@ const {
   failoverToNextAccount,
   listAccounts,
   loadAccountStore,
+  recordAccountAvailableModels,
   rememberAccount,
   removeAccount,
+  selectAccountForRequest,
   updateRememberedAccount,
 } = await import("../src/auth/accounts.ts");
 
@@ -100,6 +102,21 @@ async function testQuotaFailoverSkipsTriedTokens(): Promise<void> {
   assert(next?.token, "failover did not return another account");
 }
 
+async function testModelEligibilityTemporaryBypass(): Promise<void> {
+  // Primary active account (b) lacks gemini-4-carbon; peer (a) has it.
+  // Selecting gemini-4-carbon should borrow (a) without overwriting sticky primary (b).
+  await activateAccount("b@example.com");
+  recordAccountAvailableModels("b@example.com", ["gemini-4-hydrogen", "gemini-3.8-flash"]);
+  recordAccountAvailableModels("a@example.com", ["gemini-4-hydrogen", "gemini-4-carbon"]);
+  const sel = await selectAccountForRequest("gemini-4-carbon");
+  assert(sel.kind === "selected", "expected selected account for gemini-4-carbon");
+  if (sel.kind === "selected") {
+    assert(sel.account.email === "a@example.com", "expected peer ultra account a@example.com");
+  }
+  const active = listAccounts().find((acc) => acc.active);
+  assert(active?.email === "b@example.com", "sticky primary must stay b@example.com");
+}
+
 async function testRemovesAccount(): Promise<void> {
   await removeAccount("a@example.com");
   const remaining = listAccounts();
@@ -126,5 +143,6 @@ testKeepsRotatedRefreshTokens();
 await testNumericSelectorIgnoresDigitEmails();
 await testPreservesOtherAuthProviders();
 await testQuotaFailoverSkipsTriedTokens();
+await testModelEligibilityTemporaryBypass();
 await testRemovesAccount();
 console.log("accounts tests: ok");
