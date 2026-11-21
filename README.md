@@ -1,55 +1,45 @@
 # persona-pi-extensions
 
-Rhine 的个人专属 Pi Agent 扩展套件。
+Rhine 的个人专属 Pi Agent 扩展套件，按大类与统一前缀整理。
 
-## 包含的扩展
+## 目录结构与扩展列表
 
-1. **`extension-manager`** (`/extension-manager`)
+### 1. 界面 UI / UX 类 (`extensions/ui/pi-ui-*`)
+
+1. **`pi-ui-extension-manager`** (`/extension-manager`)
    - 终端全屏 TUI 扩展与包管理器。
-   - 集中浏览、搜索扩展与包，查看用途与配置状态。
-   - 支持单项启用/禁用暂存、整包开关、差异对比与配置回滚。
-   - 修改保存后自动支持热重载（`/reload`）。
+   - 集中浏览、搜索扩展与包，查看用途与配置状态，支持单项/整包开关、差异对比、回滚与热重载。
+2. **`pi-ui-smart-models`** (`/models`, `/m`, `Alt+M`)
+   - 智能模型选择与最近使用记录，按上游供应商分类呈现，支持模糊搜索与快速切换。
+3. **`pi-ui-sessions`** (`/sessions`)
+   - 双栏历史会话选择器，带实时对话与代码变更预览，支持 `Ctrl+D` 删除、`Ctrl+B` 切换子代理、`Ctrl+T` 切换工作区。
+4. **`pi-ui-turn-time`**
+   - 每次回答结束后在底部显示耗时（如 `Worked for 2.3s`）。
+5. **`pi-ui-input-fold`**
+   - 终端里输入或粘贴大段日志时自动折叠显示，不刷屏。
+6. **`pi-ui-image-paste`**
+   - Windows 截图粘贴自动折叠为 `[Image #1]` 占位块。
 
-2. **`smart-models`** (`/models`, `/m`, `Alt+M`)
-   - 智能模型选择与最近使用记录。
-   - 按上游供应商分类呈现，支持模糊搜索与快速切换。
+### 2. 实用工具类 (`extensions/tools/pi-tool-*`)
 
-3. **`sessions`** (`/sessions`)
-   - 双栏历史会话选择器，带实时对话与代码变更预览。
-   - 修复原版最左侧边框未闭合的渲染问题，形成完整双栏矩形边框。
-   - 支持快捷键 `Ctrl+D` 删除光标所在的历史会话（带二次确认与防误删当前活跃会话保护）。
-   - 自动过滤子代理（`subagent[...]`）和 `/btw` 临时旁白会话（`btw: ...`），界面清爽聚焦。
-   - 支持快捷键 `Ctrl+B` 一键切换是否显示子代理会话。
-   - 支持快捷键 `Ctrl+T` 切换当前目录与全部工作区会话。
-
-4. **`turn-time`**
-   - 每次回答结束后在底部微弱显示耗时（如 `Worked for 2.3s`），极简实用。
-
-5. **`bash-timeout`**
+1. **`pi-tool-subagents`** (`/subagents`, `/btw`)
+   - 独立上下文子代理调度，支持后台运行、进度监控与结果自动回传，内置多种角色分派。
+2. **`pi-tool-bash-timeout`**
    - 为非交互式子任务的 Bash 命令设置 120 秒自动超时，防止命令挂死。
 
-6. **`user-input-fold`**
-   - 终端里输入或粘贴大段日志时自动折叠显示，不刷屏。
+### 3. 通道 / Provider 类 (`extensions/providers/pi-provider-*`)
 
-7. **`image-paste`**
-   - Windows 截图粘贴自动折叠为 `[Image #1]` 清爽占位块。
+1. **`pi-provider-antigravity`** (`/agy`, `/antigravity.*`)
+   - 精简版 Antigravity OAuth Provider（基于 `Rahularya01/pi-antigravity`，MIT 协议）。
+   - 支持本地 HTTP 代理 OAuth 登录与刷新、重复 `-tiered` 模型去重、类 Magpie 多账号冷却感知与热切换，以及圆角控制台 `/agy`。
 
-8. **`subagents`** (`/subagents`, `/btw`)
-   - 独立上下文子代理调度，支持后台独立运行、进度监控与结果自动回传。
-   - 内置 reviewer（审查者）、explorer（探索者）、implementer（执行者）等多角色独立分派。
-
-## 安装与使用
-
-在任意已安装 Pi 的机器上：
+## 安装与更新
 
 ```bash
 pi install git:github.com/rhine9473/persona-pi-extensions
-```
-
-## 更新扩展
-
-在终端中执行：
-
-```bash
 pi update --extensions
 ```
+
+## License
+
+MIT — 包含各自独立扩展的上游 MIT 版权声明。

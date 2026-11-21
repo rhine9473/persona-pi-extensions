@@ -1,6 +1,6 @@
 /** Compact, defensive context-window utilization formatting for child agents. */
 
-import type { SubagentSpend } from "../subagents/src/domain.ts";
+import type { SubagentSpend } from "../tools/pi-tool-subagents/src/domain.ts";
 
 export interface ContextUtilization {
   /** Current conversation context occupancy; null while it is unknown after compaction. */

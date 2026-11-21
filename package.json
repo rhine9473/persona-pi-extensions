@@ -7,22 +7,27 @@
     "pi-package"
   ],
   "type": "module",
+  "scripts": {
+    "test": "node --test extensions/ui/pi-ui-extension-manager/*.test.mjs && cd extensions/providers/pi-provider-antigravity && node scripts/run-ts.mjs scripts/test-accounts.ts && node scripts/run-ts.mjs scripts/test-hot-failover-and-ui.ts && node scripts/run-ts.mjs scripts/test-oauth-fetch.ts && node scripts/run-ts.mjs scripts/test-http-proxy.ts && node scripts/run-ts.mjs scripts/test-model-routing.ts && node scripts/run-ts.mjs scripts/test-model-discovery.ts && node scripts/run-ts.mjs scripts/test-model-pricing.ts && node scripts/run-ts.mjs scripts/test-usage-formatter.ts && node scripts/run-ts.mjs scripts/test-stream-sse.ts && node scripts/run-ts.mjs scripts/test-stream-header-deadline.ts && node scripts/run-ts.mjs scripts/test-stream-recovery.ts && node scripts/run-ts.mjs scripts/test-capacity-retry.ts && node scripts/run-ts.mjs scripts/test-inline-system.ts && node scripts/run-ts.mjs scripts/test-sanitize-text.ts && node scripts/run-ts.mjs scripts/test-transcript-context.ts && node scripts/run-ts.mjs scripts/test-provider-registration.ts"
+  },
   "pi": {
     "extensions": [
-      "./extensions/extension-manager",
-      "./extensions/smart-models.ts",
-      "./extensions/sessions",
-      "./extensions/turn-time.ts",
-      "./extensions/bash-timeout.ts",
-      "./extensions/user-input-fold.ts",
-      "./extensions/image-paste",
-      "./extensions/subagents"
+      "./extensions/ui/pi-ui-extension-manager",
+      "./extensions/ui/pi-ui-smart-models.ts",
+      "./extensions/ui/pi-ui-sessions",
+      "./extensions/ui/pi-ui-turn-time.ts",
+      "./extensions/ui/pi-ui-input-fold.ts",
+      "./extensions/ui/pi-ui-image-paste",
+      "./extensions/tools/pi-tool-subagents",
+      "./extensions/tools/pi-tool-bash-timeout.ts",
+      "./extensions/providers/pi-provider-antigravity/src/index.ts"
     ],
     "skills": [
       "./skills/subagents"
     ]
   },
   "dependencies": {
-    "effect": "^4.0.0-beta.103"
+    "effect": "^4.0.0-beta.103",
+    "undici": "^8.12.4"
   }
 }

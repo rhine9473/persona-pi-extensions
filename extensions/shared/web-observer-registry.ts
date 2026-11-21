@@ -4,7 +4,7 @@ import type {
   SubagentSpend,
   TranscriptItem,
   TranscriptPart,
-} from "../subagents/src/domain.ts";
+} from "../tools/pi-tool-subagents/src/domain.ts";
 import type { ChildExecutionAdmissionSnapshot } from "./child-execution-admission.ts";
 
 export type WebCapabilityKind = "subagents" | "workflows";
