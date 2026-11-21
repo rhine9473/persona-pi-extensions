@@ -40,7 +40,15 @@ interface NativeUserMessageInternals {
   text?: string;
   markdownTheme?: MarkdownTheme;
   outputPad?: number;
+  timestamp?: number;
   children?: Array<{ options?: Record<string, unknown> }>;
+}
+
+function formatClock(ts?: number): string {
+  if (typeof ts !== "number" || !Number.isFinite(ts) || ts <= 0) return "";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "";
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
 function padToWidth(line: string, targetWidth: number): string {
@@ -108,10 +116,14 @@ export function installUserCard(getTheme: () => Theme | undefined): void {
       }
 
       const b = (s: string) => theme.fg("borderAccent", s);
-      const badge = ` ${theme.fg("accent", "❯")} `;
-      const topFill = Math.max(1, inner - 1 - visibleWidth(badge));
+      const badge = ` ${theme.fg("accent", theme.bold("❯ 你"))} `;
+      const clock = formatClock(internals.timestamp);
+      const meta = clock ? ` ${clock} ` : "";
+      const topFill = Math.max(1, inner - 1 - visibleWidth(badge) - visibleWidth(meta) - (meta ? 1 : 0));
       const topLine = truncateToWidth(
-        `${" ".repeat(pad)}${b("╭─")}${badge}${b("─".repeat(topFill))}${b("╮")}`,
+        `${" ".repeat(pad)}${b("╭─")}${badge}${b("─".repeat(topFill))}` +
+          (meta ? `${theme.fg("muted", meta)}${b("─")}` : "") +
+          b("╮"),
         width,
         "",
       );
