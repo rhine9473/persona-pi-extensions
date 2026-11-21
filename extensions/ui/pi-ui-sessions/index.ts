@@ -100,14 +100,14 @@ const themeText = (
   if (kind === "subtitle") return theme.fg("dim", text);
   if (kind === "rule") return theme.fg("borderMuted", text);
   if (kind === "user") return theme.fg("accent", theme.bold(text));
-  if (kind === "assistant") return theme.fg("warning", theme.bold(text));
-  if (kind === "tool") return theme.fg("muted", theme.bold(text));
+  if (kind === "assistant") return theme.fg("border", theme.bold(text));
+  if (kind === "tool") return theme.fg("muted", text);
   if (kind === "error") return theme.fg("error", text);
   if (kind === "muted") return theme.fg("muted", text);
   if (kind === "thinking")
     return theme.italic
-      ? theme.italic(theme.fg("dim", text))
-      : theme.fg("dim", text);
+      ? theme.italic(theme.fg("thinkingText", text))
+      : theme.fg("thinkingText", text);
   return theme.fg("text", text);
 };
 
@@ -194,8 +194,8 @@ const summarizeToolRun = (blocks: PreviewBlock[]): string => {
 
   const nameList = Array.from(names).slice(0, 4).join(", ");
   const moreNames = names.size > 4 ? ` +${names.size - 4}` : "";
-  const output = outputLines > 0 ? ` · ${outputLines} output lines` : "";
-  return `${hasError ? "✖" : "▸"} Tool activity · ${blocks.length} events${nameList ? ` · ${nameList}${moreNames}` : ""}${output} (press t)`;
+  const output = outputLines > 0 ? ` · ${outputLines} 行输出` : "";
+  return `${hasError ? "✖" : "▸"} 工具活动 · ${blocks.length} 次${nameList ? ` · ${nameList}${moreNames}` : ""}${output}（按 t 展开）`;
 };
 
 const renderPreviewBlock = (
@@ -213,27 +213,21 @@ const renderPreviewBlock = (
   }
 
   if (block.kind === "user") {
-    return renderTextBlock("◆ User", block.text, width, theme, "user");
+    return renderTextBlock("◆ 用户", block.text, width, theme, "user");
   }
 
   if (block.kind === "assistant") {
-    return renderTextBlock(
-      "● Assistant",
-      block.text,
-      width,
-      theme,
-      "assistant",
-    );
+    return renderTextBlock("● 助手", block.text, width, theme, "assistant");
   }
 
   if (block.kind === "thinking") {
     if (!options.thinkingVisible)
-      return [themeText(theme, "thinking", "◌ Thinking hidden")];
-    return renderTextBlock("◌ Thinking", block.text, width, theme, "thinking");
+      return [themeText(theme, "thinking", "◌ 思考已折叠（按 h 展开）")];
+    return renderTextBlock("◌ 思考", block.text, width, theme, "thinking");
   }
 
   if (block.kind === "toolCall") {
-    const header = `▸ Tool call · ${block.name}`;
+    const header = `▸ 调用工具 · ${block.name}`;
     if (!options.toolsExpanded || !block.args)
       return [themeText(theme, "tool", header)];
     return [
@@ -243,7 +237,7 @@ const renderPreviewBlock = (
   }
 
   if (block.kind === "toolResult") {
-    const label = `${block.isError ? "✖" : "▸"} Tool result${block.name ? ` · ${block.name}` : ""}`;
+    const label = `${block.isError ? "✖" : "▸"} 工具返回${block.name ? ` · ${block.name}` : ""}`;
     const compact = compactText(block.text, options.toolsExpanded ? 200 : 4);
     const lines = [themeText(theme, block.isError ? "error" : "tool", label)];
     for (const line of compact.lines) {
@@ -257,7 +251,7 @@ const renderPreviewBlock = (
       lines.push(
         theme.fg(
           "dim",
-          `  … ${compact.hidden} output lines collapsed (press t to expand tools)`,
+          `  … 已折叠 ${compact.hidden} 行输出（按 t 展开）`,
         ),
       );
     return lines;
@@ -287,7 +281,7 @@ const renderPreviewBlock = (
       lines.push(
         theme.fg(
           "dim",
-          `  … ${compact.hidden} output lines collapsed (press t to expand tools)`,
+          `  … 已折叠 ${compact.hidden} 行输出（按 t 展开）`,
         ),
       );
     return lines;
@@ -330,21 +324,20 @@ const formatItemLabel = (
       parts.length -
       1;
   } else if (statsState?.status === "pending") {
-    statsStr = theme.fg("dim", "…");
-    statsLen = 1;
-  } else if (statsState?.status === "unavailable") {
-    statsStr = theme.fg("warning", "?");
+    statsStr = theme.fg("dim", "·");
     statsLen = 1;
   }
 
-  const timeWidth = itemWidth - 5 - (statsLen > 0 ? statsLen + 3 : 1);
-  const timeStr = formatRelativeTime(
+  const timeWidth = Math.max(0, itemWidth - 5 - (statsLen > 0 ? statsLen + 3 : 1));
+  const rawTimeStr = formatRelativeTime(
     session.modified,
     new Date(),
-    Math.max(0, timeWidth),
+    timeWidth,
   );
+  const timeSlotWidth = rawTimeStr ? Math.max(rawTimeStr.length, Math.min(15, timeWidth)) : 0;
+  const timeStr = rawTimeStr.padStart(timeSlotWidth, " ");
   const title = buildSessionLabel(session);
-  const reserved = 1 + timeStr.length + (statsLen > 0 ? statsLen + 2 : 0);
+  const reserved = 1 + timeSlotWidth + (statsLen > 0 ? statsLen + 2 : 0);
   const titleWidth = Math.max(5, itemWidth - reserved);
   const truncatedTitle = truncateToWidth(title, titleWidth, "…");
 
@@ -353,7 +346,7 @@ const formatItemLabel = (
     itemWidth -
     visibleTitleLen -
     (statsLen > 0 ? statsLen : 0) -
-    timeStr.length;
+    timeSlotWidth;
 
   if (statsStr) {
     const pad1 = " ".repeat(Math.max(1, paddingSize - 2));
@@ -379,23 +372,27 @@ const renderPreview = (
   focus: "list" | "preview",
 ): { lines: string[]; totalLines: number; maxScroll: number } => {
   const raw: string[] = [];
+  // Leave 1 space before the right scrollbar/border so CJK glyphs at the end
+  // of a wrapped line are never clipped off.
+  const contentWidth = Math.max(1, width - 2);
 
-  // Left-aligned, like every other OpenPI heading: centred titles read as a
-  // different application than the panel they sit inside, and they wander as
-  // the pane resizes.
   if (!preview) {
-    raw.push(themeText(theme, "title", "Preview"));
-    raw.push(themeText(theme, "subtitle", "Loading selected session…"));
+    raw.push(themeText(theme, focus === "preview" ? "title" : "muted", "对话预览"));
+    raw.push(themeText(theme, "subtitle", "正在加载会话预览…"));
   } else {
-    const titleStr = "Thread preview";
+    const titleStr = "对话预览";
     raw.push(
       focus === "preview"
         ? themeText(theme, "title", titleStr)
-        : themeText(theme, "subtitle", titleStr),
+        : themeText(theme, "muted", titleStr),
     );
     raw.push(themeText(theme, "subtitle", preview.subtitle));
 
-    raw.push(themeText(theme, "rule", "─".repeat(Math.max(0, width))));
+    raw.push(
+      focus === "preview"
+        ? theme.fg("accent", "━".repeat(contentWidth))
+        : theme.fg("borderMuted", "─".repeat(contentWidth)),
+    );
 
     for (let i = 0; i < preview.blocks.length; i++) {
       const block = preview.blocks[i]!;
@@ -410,25 +407,25 @@ const renderPreview = (
         raw.push(
           ...wrapTextWithAnsi(
             themeText(theme, "tool", summarizeToolRun(run)),
-            width,
+            contentWidth,
           ),
         );
         continue;
       }
 
       if (raw.length > 3) raw.push("");
-      raw.push(...renderPreviewBlock(block, width, theme, options));
+      raw.push(...renderPreviewBlock(block, contentWidth, theme, options));
     }
   }
 
   const maxScroll = Math.max(0, raw.length - height);
   const boundedOffset = Math.max(0, Math.min(scrollOffset, maxScroll));
 
-  // Render scrollbar on the right border
+  // Render scrollbar directly on the outer right rounded border
   const visible: string[] = [];
   const thumbSize = Math.max(
     1,
-    Math.min(height, Math.round((height / raw.length) * height)),
+    Math.min(height, Math.round((height / Math.max(1, raw.length)) * height)),
   );
   const thumbStart =
     maxScroll > 0
@@ -446,17 +443,13 @@ const renderPreview = (
     const line = lineIndex < raw.length ? raw[lineIndex]! : "";
 
     let scrollChar = "";
-    if (maxScroll > 0) {
-      if (i >= thumbStart && i < thumbStart + thumbSize) {
-        scrollChar = theme.fg("text", "█");
-      } else {
-        scrollChar = theme.fg("borderMuted", "│");
-      }
+    if (maxScroll > 0 && i >= thumbStart && i < thumbStart + thumbSize) {
+      scrollChar = theme.fg(focus === "preview" ? "accent" : "dim", "┃");
     } else {
-      scrollChar = theme.fg("borderMuted", "│");
+      scrollChar = theme.fg("border", "│");
     }
 
-    visible.push(padAnsiRight(line, width - 1) + scrollChar);
+    visible.push(padAnsiRight(line, contentWidth) + " " + scrollChar);
   }
 
   return { lines: visible, totalLines: raw.length, maxScroll };
@@ -792,76 +785,81 @@ async function showSessionPicker(
       };
 
       const renderFilter = (width: number) => {
-        const border = (text: string) =>
-          theme.fg(focus === "list" ? "accent" : "borderMuted", text);
-        const prefix = " ⌕ [ ";
-        const suffix = " ]";
+        const prefix = " ⌕ ";
         const value = truncateToWidth(
-          filter || "type to filter",
-          Math.max(0, width - visibleWidth(prefix + suffix)),
+          filter || "输入关键词筛选…",
+          Math.max(0, width - visibleWidth(prefix) - 1),
         );
+        const rule =
+          focus === "list"
+            ? theme.fg("accent", "━".repeat(Math.max(0, width)))
+            : theme.fg("borderMuted", "─".repeat(Math.max(0, width)));
         return [
           truncateToWidth(
-            border(prefix) +
-              theme.fg(filter ? "text" : "muted", value) +
-              border(suffix),
+            theme.fg(focus === "list" ? "accent" : "dim", prefix) +
+              theme.fg(filter ? "text" : "dim", value),
             width,
           ),
-          theme.fg("borderMuted", "─".repeat(Math.max(0, width))),
+          rule,
         ];
       };
 
-      const renderSinglePane = (width: number): string[] => {
-        const container = new Container();
+      const renderFooterBar = (innerWidth: number, hasPreviewScroll: boolean, totalLines: number, contentHeight: number) => {
+        const rightMeta = confirmingDeletePath
+          ? ""
+          : hasPreviewScroll
+            ? theme.fg("dim", `${previewScrollOffset + 1}-${Math.min(previewScrollOffset + contentHeight, totalLines)}/${totalLines}  Esc 关闭`)
+            : theme.fg("dim", "Esc 关闭");
+        const leftBudget = Math.max(1, innerWidth - visibleWidth(rightMeta) - (rightMeta ? 2 : 1));
+        const left = hintLine(
+          theme,
+          confirmingDeletePath
+            ? [
+                ["Enter/y", "确认删除"],
+                ["Esc/n", "取消"],
+              ]
+            : [
+                ["↑↓", "选择"],
+                ["Enter", "打开"],
+                ["Tab", "切焦点"],
+                ["t", toolsExpanded ? "折叠工具" : "展开工具"],
+                ["h", thinkingVisible ? "隐藏思考" : "展开思考"],
+                ["Ctrl+T", showAllWorkspaces ? "当前工作区" : "全工作区"],
+                ["Ctrl+B", showSubagents ? "隐藏子代理" : "含子代理"],
+                ["Ctrl+D", "删除"],
+              ],
+          leftBudget,
+          confirmingDeletePath ? "确认删除选中会话？ (Enter/y 确认 · Esc/n 取消)" : undefined,
+        );
+        const gap = Math.max(1, innerWidth - visibleWidth(left) - visibleWidth(rightMeta));
+        return padAnsiRight(`${left}${" ".repeat(gap)}${rightMeta}`, innerWidth);
+      };
 
-        container.addChild(
-          new DynamicBorder((text: string) => theme.fg("accent", text)),
-        );
-        container.addChild(
-          new Text(theme.fg("accent", theme.bold("Sessions")), 1, 0),
-        );
-        container.addChild(
-          new Text(renderFilter(Math.max(0, width - 2)).join("\n"), 1, 0),
-        );
+      const renderSinglePane = (width: number): string[] => {
+        const innerWidth = Math.max(20, width - 2);
+        const termRows = Math.max(12, tui.terminal?.rows ?? 24);
+        // top border (1) + filter (2) + footer rule (1) + footer (1) + bottom border (1) = 6
+        const contentHeight = Math.max(4, termRows - 6);
+        const filterRows = renderFilter(innerWidth);
+        const listHeight = Math.max(1, contentHeight - filterRows.length);
+
+        let bodyLines: string[] = [];
         if (isLoading) {
-          container.addChild(new Spacer(1));
-          container.addChild(
-            new Text(theme.fg("muted", "  Loading sessions…"), 1, 0),
-          );
-          container.addChild(new Spacer(1));
+          bodyLines = [...filterRows, "", theme.fg("muted", "  正在加载会话…")];
         } else {
-          // Frame, title, two filter rows and hints occupy six rows. Native
-          // SelectList adds a scroll indicator when its item window is clipped.
-          const listHeight = Math.max(
-            1,
-            Math.max(12, tui.terminal?.rows ?? 24) - 6,
-          );
-          const requestedVisible = Math.min(
-            maxVisible,
-            Math.max(filteredEntries.length, 1),
-          );
-          const scrollRows =
-            filteredEntries.length > Math.min(requestedVisible, listHeight)
-              ? 1
-              : 0;
+          const scrollRows = filteredEntries.length > listHeight ? 1 : 0;
           const effectiveVisible = Math.max(
             1,
-            Math.min(requestedVisible, listHeight - scrollRows),
+            Math.min(listHeight - scrollRows, Math.max(filteredEntries.length, 1)),
           );
           ensureStatsWindowLoad(effectiveVisible);
-          const items = buildItems(filteredEntries, width);
+          const items = buildItems(filteredEntries, innerWidth);
           selectList = new SelectList(items, effectiveVisible, {
-            selectedPrefix: (text) =>
-              theme.fg(focus === "list" ? "accent" : "muted", text),
-            selectedText: (text) =>
-              theme.fg(focus === "list" ? "accent" : "muted", text),
+            selectedPrefix: (text) => theme.fg("accent", text),
+            selectedText: (text) => theme.bold(theme.fg("accent", text)),
             description: (text) => theme.fg("muted", text),
             scrollInfo: (text) => theme.fg("dim", text),
-            noMatch: () =>
-              theme.fg(
-                "warning",
-                truncateToWidth("  No matching sessions", width),
-              ),
+            noMatch: () => theme.fg("muted", "  没有匹配的会话"),
           });
           const selectedIndex = filteredEntries.findIndex(
             (entry) => entry.session.path === selectedPath,
@@ -871,57 +869,68 @@ async function showSessionPicker(
             finishPicker(sessionByPath.get(item.value) ?? null);
           selectList.onCancel = () => finishPicker(null);
           selectList.onSelectionChange = (item) => setSelectedPath(item.value);
-          container.addChild(selectList);
+          bodyLines = [...filterRows, ...selectList.render(innerWidth)].slice(0, contentHeight);
         }
-        container.addChild(
-          new Text(
-            hintLine(
-              theme,
-              [
-                ["↑↓", "navigate"],
-                ["enter", "open"],
-                ["esc", "cancel"],
-              ],
-              Math.max(1, width - 2),
-            ),
-            1,
-            0,
-          ),
-        );
-        container.addChild(
-          new DynamicBorder((text: string) => theme.fg("accent", text)),
-        );
-        return container.render(width);
+        while (bodyLines.length < contentHeight) bodyLines.push("");
+
+        const scopeLabel = showAllWorkspaces ? "全工作区" : "当前工作区";
+        const titlePart = ` 会话 `;
+        const metaPart = ` ${filteredEntries.length} 个 · ${scopeLabel} `;
+        const fill = Math.max(1, innerWidth - visibleWidth(titlePart) - visibleWidth(metaPart) - 2);
+        const top =
+          theme.fg("border", "╭─") +
+          theme.bold(theme.fg("accent", titlePart)) +
+          theme.fg("border", "─".repeat(fill)) +
+          theme.fg("muted", metaPart) +
+          theme.fg("border", "─╮");
+        const side = theme.fg("border", "│");
+        const footerRule = `${theme.fg("border", "├")}${theme.fg("borderMuted", "─".repeat(innerWidth))}${theme.fg("border", "┤")}`;
+        const footer = `${side}${renderFooterBar(innerWidth, false, 0, contentHeight)}${side}`;
+        const bottom = theme.fg("border", `╰${"─".repeat(innerWidth)}╯`);
+        return [
+          top,
+          ...bodyLines.map((l) => `${side}${padAnsiRight(l, innerWidth)}${side}`),
+          footerRule,
+          footer,
+          bottom,
+        ].map((line) => truncateToWidth(line, width, "", true));
       };
 
       const buildTopBorder = (
         listWidth: number,
         previewWidth: number,
+        rightMeta: string,
       ): string => {
-        const leftTitle = " sessions ";
-        const rightTitle = " preview ";
-        const left = `┌─${leftTitle}${"─".repeat(Math.max(0, listWidth - leftTitle.length - 2))}`;
-        const right =
-          `─${rightTitle}${"─".repeat(Math.max(0, previewWidth - rightTitle.length - 2))}` +
-          "┐";
-        return `${theme.fg("borderMuted", left)}${theme.fg("borderMuted", "─┬─")}${theme.fg("borderMuted", right)}`;
-      };
-
-      const buildBottomBorder = (
-        listWidth: number,
-        previewWidth: number,
-      ): string => {
-        const left = `└${"─".repeat(Math.max(0, listWidth - 1))}`;
-        const right = `${"─".repeat(Math.max(0, previewWidth - 1))}┘`;
-        return `${theme.fg("borderMuted", left)}${theme.fg("borderMuted", "─┴─")}${theme.fg("borderMuted", right)}`;
+        const leftTitle = " 会话 ";
+        const rightTitle = " 预览 ";
+        const leftTitleStyled = focus === "list"
+          ? theme.bold(theme.fg("accent", leftTitle))
+          : theme.fg("muted", leftTitle);
+        const rightTitleStyled = focus === "preview"
+          ? theme.bold(theme.fg("accent", rightTitle))
+          : theme.fg("muted", rightTitle);
+        const leftFill = Math.max(1, listWidth - 2 - visibleWidth(leftTitle));
+        const metaPart = rightMeta ? ` ${rightMeta} ` : "";
+        const rightContentWidth = Math.max(1, previewWidth - 3 - visibleWidth(rightTitle) - visibleWidth(metaPart));
+        return (
+          theme.fg("border", "╭─") +
+          leftTitleStyled +
+          theme.fg("border", "─".repeat(leftFill)) +
+          theme.fg("borderMuted", "─┬─") +
+          theme.fg("border", "─") +
+          rightTitleStyled +
+          theme.fg("border", "─".repeat(rightContentWidth)) +
+          (metaPart ? theme.fg("muted", metaPart) : "") +
+          theme.fg("border", "─╮")
+        );
       };
 
       const renderSplitPane = (width: number): string[] => {
         const layout = getSessionPaneLayout(width);
         const innerListWidth = Math.max(10, layout.listWidth - 1);
         const termRows = Math.max(12, tui.terminal?.rows ?? 24);
-        // Frame (2) + hint line (1).
-        const contentHeight = Math.max(8, termRows - 3);
+        // top border (1) + footer rule (1) + footer (1) + bottom border (1) = 4
+        const contentHeight = Math.max(8, termRows - 4);
         const filterRows = renderFilter(innerListWidth);
         const listHeight = Math.max(1, contentHeight - filterRows.length);
 
@@ -929,7 +938,7 @@ async function showSessionPicker(
         if (isLoading) {
           leftLines.push(...filterRows);
           leftLines.push("");
-          leftLines.push(theme.fg("muted", "  Loading sessions..."));
+          leftLines.push(theme.fg("muted", "  正在加载会话…"));
         } else {
           const scrollRows = filteredEntries.length > listHeight ? 1 : 0;
           const effectiveVisible = Math.max(
@@ -945,10 +954,12 @@ async function showSessionPicker(
             selectedPrefix: (text) =>
               theme.fg(focus === "list" ? "accent" : "muted", text),
             selectedText: (text) =>
-              theme.fg(focus === "list" ? "accent" : "muted", text),
+              focus === "list"
+                ? theme.bold(theme.fg("accent", text))
+                : theme.bold(theme.fg("text", text)),
             description: (text) => theme.fg("muted", text),
             scrollInfo: (text) => theme.fg("dim", text),
-            noMatch: () => theme.fg("warning", "  No matching sessions"),
+            noMatch: () => theme.fg("muted", "  没有匹配的会话"),
           });
           const selectedIndex = filteredEntries.findIndex(
             (entry) => entry.session.path === selectedPath,
@@ -983,54 +994,27 @@ async function showSessionPicker(
           previewScrollOffset,
           renderedPreview.maxScroll,
         );
-        // Hints live on their own line under the frame instead of being packed
-        // into the bottom border, where they had to compete with the border for
-        // the same row and lost the keys in a wall of dim text.
-        const hints = hintLine(
-          theme,
-          confirmingDeletePath
-            ? [
-                ["enter/y", "confirm delete"],
-                ["esc/n", "cancel"],
-              ]
-            : [
-                renderedPreview.maxScroll > 0
-                  ? ([
-                      "",
-                      `${previewScrollOffset + 1}-${Math.min(previewScrollOffset + contentHeight, renderedPreview.totalLines)}/${renderedPreview.totalLines}`,
-                    ] as const)
-                  : undefined,
-                renderedPreview.maxScroll > 0
-                  ? (["pgup/pgdn", "scroll"] as const)
-                  : undefined,
-                ["t", toolsExpanded ? "compact" : "tools"],
-                ["h", thinkingVisible ? "hide thinking" : "thinking"],
-                [
-                  "ctrl+t",
-                  showAllWorkspaces ? "current workspace" : "all workspaces",
-                ],
-                [
-                  "ctrl+b",
-                  showSubagents ? "hide subagents" : "show subagents",
-                ],
-                ["ctrl+d", "delete"],
-                ["esc", "close"],
-              ],
-          width,
-          confirmingDeletePath ? "Delete selected session?" : undefined,
-        );
+        const innerTotalWidth = Math.max(1, width - 2);
+        const scopeLabel = showAllWorkspaces ? "全工作区" : "当前工作区";
+        const topMeta = `${filteredEntries.length} 个会话 · ${scopeLabel}`;
 
-        const borderChar = theme.fg("borderMuted", "│");
+        const leftBorder = theme.fg("border", "│");
         const dividerChar = theme.fg("borderMuted", " │ ");
-        const lines = [buildTopBorder(layout.listWidth, layout.previewWidth)];
+        const lines = [buildTopBorder(layout.listWidth, layout.previewWidth, topMeta)];
         for (let i = 0; i < contentHeight; i++) {
           const left = padAnsiRight(leftLines[i] ?? "", innerListWidth);
           const right =
-            renderedPreview.lines[i] ?? " ".repeat(layout.previewWidth);
-          lines.push(`${borderChar}${left}${dividerChar}${right}`);
+            renderedPreview.lines[i] ??
+            `${" ".repeat(Math.max(0, layout.previewWidth - 1))}${theme.fg("border", "│")}`;
+          lines.push(`${leftBorder}${left}${dividerChar}${right}`);
         }
-        lines.push(buildBottomBorder(layout.listWidth, layout.previewWidth));
-        lines.push(hints);
+        lines.push(
+          `${theme.fg("border", "├")}${theme.fg("borderMuted", "─".repeat(innerListWidth))}${theme.fg("borderMuted", "─┴─")}${theme.fg("borderMuted", "─".repeat(Math.max(0, layout.previewWidth - 1)))}${theme.fg("border", "┤")}`,
+        );
+        lines.push(
+          `${leftBorder}${renderFooterBar(innerTotalWidth, renderedPreview.maxScroll > 0, renderedPreview.totalLines, contentHeight)}${leftBorder}`,
+        );
+        lines.push(theme.fg("border", `╰${"─".repeat(innerTotalWidth)}╯`));
         return lines.map((line) => truncateToWidth(line, width, "", true));
       };
 
