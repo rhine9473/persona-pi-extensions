@@ -1,4 +1,4 @@
-/** Per-response tool-call folding: collapses tools in one assistant message to a crisp high-contrast summary line, while Ctrl+O restores full native details. */
+/** Per-response tool-call folding: collapses tools in one assistant message into a translucent 1px rounded box, while Ctrl+O restores full native details. */
 import { basename, isAbsolute, relative } from "node:path";
 import type {
   AgentToolResult,
@@ -8,7 +8,7 @@ import type {
   ToolDefinition,
   ToolRenderContext,
 } from "@earendil-works/pi-coding-agent";
-import { Box, type Component, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { Box, type Component, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 type Presentation = Pick<ToolDefinition, "renderCall" | "renderResult" | "renderShell">;
 
@@ -62,6 +62,19 @@ function clipText(text: string, maxChars: number): string {
   return text.length <= maxChars ? text : `${text.slice(0, Math.max(1, maxChars - 1))}…`;
 }
 
+function clipPathTail(pathText: string, maxChars: number): string {
+  if (pathText.length <= maxChars) return pathText;
+  const normalized = pathText.replace(/\\/g, "/");
+  const parts = normalized.split("/").filter(Boolean);
+  if (parts.length >= 2) {
+    const tail2 = `…/${parts.slice(-2).join("/")}`;
+    if (tail2.length <= maxChars) return tail2;
+  }
+  const base = parts.at(-1) ?? pathText;
+  if (`…/${base}`.length <= maxChars) return `…/${base}`;
+  return clipText(base, maxChars);
+}
+
 function extractTargets(
   name: string,
   args: unknown,
@@ -72,46 +85,51 @@ function extractTargets(
   if (typeof rec.path === "string" && rec.path.trim()) {
     const full = displayPath(rec.path.trim(), cwd);
     const short = basename(full) || full;
-    return { target: clipText(full, 48), shortTarget: clipText(short, 24) };
+    return { target: clipPathTail(full, 56), shortTarget: clipText(short, 24) };
   }
   if (typeof rec.command === "string" && rec.command.trim()) {
     const cmd = sanitizeOneLine(rec.command);
-    return { target: clipText(cmd, 44), shortTarget: clipText(cmd, 24) };
+    return { target: clipText(cmd, 56), shortTarget: clipText(cmd, 24) };
   }
   if (typeof rec.pattern === "string" && rec.pattern.trim()) {
     const pat = sanitizeOneLine(rec.pattern);
-    return { target: clipText(pat, 36), shortTarget: clipText(pat, 20) };
+    return { target: clipText(pat, 40), shortTarget: clipText(pat, 20) };
   }
   if (typeof rec.query === "string" && rec.query.trim()) {
     const q = sanitizeOneLine(rec.query);
-    return { target: clipText(q, 36), shortTarget: clipText(q, 20) };
+    return { target: clipText(q, 40), shortTarget: clipText(q, 20) };
   }
   if (typeof rec.url === "string" && rec.url.trim()) {
     const url = sanitizeOneLine(rec.url);
-    return { target: clipText(url, 44), shortTarget: clipText(url, 24) };
+    return { target: clipText(url, 48), shortTarget: clipText(url, 24) };
   }
   if (typeof rec.name === "string" && rec.name.trim()) {
     const n = sanitizeOneLine(rec.name);
-    return { target: clipText(n, 32), shortTarget: clipText(n, 20) };
+    return { target: clipText(n, 36), shortTarget: clipText(n, 20) };
   }
   if (name === "subagent_spawn" && typeof rec.prompt === "string" && rec.prompt.trim()) {
     const p = sanitizeOneLine(rec.prompt);
-    return { target: clipText(p, 36), shortTarget: clipText(p, 22) };
+    return { target: clipText(p, 44), shortTarget: clipText(p, 22) };
   }
   return {};
 }
 
-function extractFirstTextLine(result: AgentToolResult<unknown>): string | undefined {
+function extractErrorLine(result: AgentToolResult<unknown>): string | undefined {
+  const lines: string[] = [];
   for (const part of result.content ?? []) {
     if (part.type === "text" && typeof part.text === "string") {
-      const line = part.text
-        .split(/\r?\n/)
-        .map((l) => l.trim())
-        .find((l) => l.length > 0);
-      if (line) return sanitizeOneLine(line);
+      for (const raw of part.text.split(/\r?\n/)) {
+        const cleaned = sanitizeOneLine(raw);
+        if (cleaned) lines.push(cleaned);
+      }
     }
   }
-  return undefined;
+  if (lines.length === 0) return undefined;
+  // Prefer an explicit error/failure line near the end instead of initial banner stdout (e.g. `> pkg test`).
+  const explicit = [...lines]
+    .reverse()
+    .find((l) => /\b(error|failed|exception|exited with code|enoent|eperm)\b|^(?:error:|✖|×|ERR!)/i.test(l));
+  return explicit ?? lines[lines.length - 1];
 }
 
 function countImages(result: AgentToolResult<unknown>): number {
@@ -202,7 +220,13 @@ function summarizeToolsWithTargets(items: readonly MemberState[], theme: Theme):
   return segments.join(sep);
 }
 
-function renderSummaryLines(
+function padRight(text: string, targetWidth: number): string {
+  const clipped = truncateToWidth(text, targetWidth, "…");
+  const w = visibleWidth(clipped);
+  return w >= targetWidth ? clipped : `${clipped}${" ".repeat(targetWidth - w)}`;
+}
+
+function renderSummaryBox(
   items: readonly MemberState[],
   width: number,
   theme: Theme,
@@ -219,101 +243,108 @@ function renderSummaryLines(
   const aborted = items.filter((m) => m.status === "aborted");
   const totalImages = items.reduce((sum, m) => sum + m.imageCount, 0);
   const elapsed = groupElapsedMs(items, now);
-  const elapsedText = elapsed !== undefined ? theme.fg("dim", formatDuration(elapsed)) : "";
-  const maxWidth = Math.max(1, width - outputPad);
+  const elapsedStr = elapsed !== undefined ? formatDuration(elapsed) : "";
+  const maxBoxWidth = Math.max(24, width - outputPad * 2);
 
-  const parts: string[] = [];
-  let rail = theme.fg("accent", "▎");
-  let lead = theme.fg("success", "✓");
+  let borderToken: "border" | "warning" | "error" | "borderMuted" = "border";
+  let titleText = "";
+  let rightMetaParts: string[] = [];
+  const bodyLines: string[] = [];
 
   if (running.length > 0) {
-    rail = theme.fg("warning", "▎");
+    borderToken = "warning";
     const frame = SPINNER_FRAMES[spinnerIdx % SPINNER_FRAMES.length] ?? "⠋";
-    lead = theme.fg("warning", frame);
     if (running.length === 1) {
       const active = running[0]!;
-      const label = theme.fg("toolTitle", theme.bold(active.name));
-      const target = active.target ? ` ${theme.fg("text", active.target)}` : "";
-      parts.push(`${label}${target}`);
+      titleText = `${theme.fg("warning", frame)} ${theme.fg("toolTitle", theme.bold(active.name))}`;
+      if (active.target) bodyLines.push(` ${theme.fg("text", active.target)}`);
     } else {
-      const names = [...new Set(running.map((r) => r.name))].slice(0, 3).join(", ");
-      parts.push(`${theme.fg("toolTitle", theme.bold(`${running.length} running`))} ${theme.fg("text", names)}`);
+      titleText = `${theme.fg("warning", frame)} ${theme.fg("toolTitle", theme.bold(`${running.length} running`))}`;
+      bodyLines.push(` ${summarizeToolsWithTargets(items, theme)}`);
     }
     if (items.length > 1) {
       const doneCount = items.length - running.length - queued.length;
-      parts.push(theme.fg("muted", `${doneCount}/${items.length}`));
-      parts.push(summarizeToolsWithTargets(items, theme));
+      rightMetaParts.push(`${doneCount}/${items.length}`);
+      if (running.length === 1) bodyLines.push(` ${summarizeToolsWithTargets(items, theme)}`);
     }
-    if (elapsedText) parts.push(elapsedText);
+    if (elapsedStr) rightMetaParts.push(elapsedStr);
   } else if (queued.length === items.length) {
-    rail = theme.fg("dim", "▎");
-    lead = theme.fg("dim", "◌");
+    borderToken = "borderMuted";
     if (items.length === 1) {
       const only = items[0]!;
-      parts.push(
-        `${theme.fg("toolTitle", theme.bold(only.name))}${only.target ? ` ${theme.fg("text", only.target)}` : ""}`,
-      );
+      titleText = `${theme.fg("dim", "◌")} ${theme.fg("toolTitle", theme.bold(only.name))}`;
+      if (only.target) bodyLines.push(` ${theme.fg("text", only.target)}`);
     } else {
-      parts.push(theme.fg("muted", `${items.length} calls`));
-      parts.push(summarizeToolsWithTargets(items, theme));
+      titleText = `${theme.fg("dim", "◌")} ${theme.fg("muted", `${items.length} calls`)}`;
+      bodyLines.push(` ${summarizeToolsWithTargets(items, theme)}`);
     }
   } else if (errors.length > 0) {
-    rail = theme.fg("error", "▎");
-    lead = theme.fg("error", "✕");
-    if (items.length === 1) {
-      const firstErr = errors[0]!;
-      const target = firstErr.target ? ` ${theme.fg("text", firstErr.target)}` : "";
-      parts.push(`${theme.fg("error", theme.bold(firstErr.name))}${target}`);
-    } else {
-      parts.push(theme.fg("text", `${items.length} calls`));
-      parts.push(theme.fg("error", `${errors.length} failed`));
-      parts.push(summarizeToolsWithTargets(items, theme));
-    }
-    if (totalImages > 0) parts.push(theme.fg("muted", `${totalImages} image${totalImages > 1 ? "s" : ""}`));
-    if (elapsedText) parts.push(elapsedText);
-  } else if (aborted.length > 0) {
-    rail = theme.fg("muted", "▎");
-    lead = theme.fg("muted", "■");
-    if (items.length === 1) {
-      const only = items[0]!;
-      parts.push(
-        `${theme.fg("toolTitle", theme.bold(only.name))}${only.target ? ` ${theme.fg("text", only.target)}` : ""}`,
-      );
-    } else {
-      parts.push(theme.fg("text", `${items.length} calls`));
-      parts.push(summarizeToolsWithTargets(items, theme));
-    }
-    parts.push(theme.fg("muted", "aborted"));
-    if (elapsedText) parts.push(elapsedText);
-  } else {
-    if (items.length === 1) {
-      const only = items[0]!;
-      parts.push(
-        `${theme.fg("toolTitle", theme.bold(only.name))}${only.target ? ` ${theme.fg("text", only.target)}` : ""}`,
-      );
-    } else {
-      parts.push(theme.fg("text", `${items.length} calls`));
-      parts.push(summarizeToolsWithTargets(items, theme));
-    }
-    if (totalImages > 0) parts.push(theme.fg("muted", `${totalImages} image${totalImages > 1 ? "s" : ""}`));
-    if (elapsedText) parts.push(elapsedText);
-  }
-
-  const lines = [
-    truncateToWidth(`${pad}${rail}${lead} ${parts.join(sep)}`, maxWidth, theme.fg("dim", "…")),
-  ];
-
-  if (errors.length > 0 && running.length === 0) {
+    borderToken = "error";
     const firstErr = errors[0]!;
+    if (items.length === 1) {
+      titleText = `${theme.fg("error", "✕")} ${theme.fg("error", theme.bold(firstErr.name))}`;
+      if (firstErr.target) bodyLines.push(` ${theme.fg("text", firstErr.target)}`);
+    } else {
+      titleText = `${theme.fg("error", "✕")} ${theme.fg("text", `${items.length} calls`)} ${theme.fg("error", `· ${errors.length} failed`)}`;
+      bodyLines.push(` ${summarizeToolsWithTargets(items, theme)}`);
+    }
     const errMsg = firstErr.errorLine ? `${firstErr.name}: ${firstErr.errorLine}` : `${firstErr.name} failed`;
     const expandHint = keyHint ? keyHint("app.tools.expand", "展开") : "";
-    const detail = expandHint
-      ? `${theme.fg("error", clipText(errMsg, 72))}${sep}${expandHint}`
-      : theme.fg("error", clipText(errMsg, 84));
-    lines.push(truncateToWidth(`${pad}${rail}  ${detail}`, maxWidth, theme.fg("dim", "…")));
+    bodyLines.push(
+      ` ${theme.fg("error", clipText(errMsg, 72))}${expandHint ? `${sep}${expandHint}` : ""}`,
+    );
+    if (totalImages > 0) rightMetaParts.push(`${totalImages} image${totalImages > 1 ? "s" : ""}`);
+    if (elapsedStr) rightMetaParts.push(elapsedStr);
+  } else if (aborted.length > 0) {
+    borderToken = "borderMuted";
+    if (items.length === 1) {
+      const only = items[0]!;
+      titleText = `${theme.fg("muted", "■")} ${theme.fg("toolTitle", theme.bold(only.name))}`;
+      if (only.target) bodyLines.push(` ${theme.fg("text", only.target)}`);
+    } else {
+      titleText = `${theme.fg("muted", "■")} ${theme.fg("text", `${items.length} calls`)}`;
+      bodyLines.push(` ${summarizeToolsWithTargets(items, theme)}`);
+    }
+    rightMetaParts.push("aborted");
+    if (elapsedStr) rightMetaParts.push(elapsedStr);
+  } else {
+    borderToken = "border";
+    if (items.length === 1) {
+      const only = items[0]!;
+      titleText = `${theme.fg("success", "✓")} ${theme.fg("toolTitle", theme.bold(only.name))}`;
+      if (only.target) bodyLines.push(` ${theme.fg("text", only.target)}`);
+    } else {
+      titleText = `${theme.fg("success", "✓")} ${theme.fg("text", `${items.length} calls`)}`;
+      bodyLines.push(` ${summarizeToolsWithTargets(items, theme)}`);
+    }
+    if (totalImages > 0) rightMetaParts.push(`${totalImages} image${totalImages > 1 ? "s" : ""}`);
+    if (elapsedStr) rightMetaParts.push(elapsedStr);
   }
 
-  return lines;
+  const titlePart = ` ${titleText} `;
+  const metaText = rightMetaParts.join(" · ");
+  const metaPart = metaText ? ` ${metaText} ` : "";
+  const minTopWidth = visibleWidth(titlePart) + visibleWidth(metaPart) + 6;
+  const maxContentWidth = bodyLines.reduce((max, line) => Math.max(max, visibleWidth(line) + 1), 0);
+  const desiredBoxWidth = Math.max(38, minTopWidth, maxContentWidth + 2);
+  const boxWidth = Math.min(maxBoxWidth, desiredBoxWidth);
+  const innerWidth = Math.max(10, boxWidth - 2);
+
+  const clippedTitle = truncateToWidth(titlePart, Math.max(6, innerWidth - visibleWidth(metaPart) - 3), "…");
+  const fillCount = Math.max(1, innerWidth - visibleWidth(clippedTitle) - visibleWidth(metaPart) - 2);
+  const b = (s: string) => theme.fg(borderToken, s);
+
+  const topLine =
+    `${pad}${b("╭─")}${clippedTitle}${b("─".repeat(fillCount))}` +
+    (metaPart ? theme.fg("dim", metaPart) : "") +
+    b("─╮");
+  const side = b("│");
+  const bottomLine = `${pad}${b(`╰${"─".repeat(innerWidth)}╯`)}`;
+
+  const framedBody = bodyLines.map((line) => `${pad}${side}${padRight(line, innerWidth)}${side}`);
+  return [topLine, ...framedBody, bottomLine].map((line) =>
+    truncateToWidth(line, Math.max(1, width), theme.fg("dim", "…")),
+  );
 }
 
 function createFallbackCallComponent(name: string, args: unknown, theme: Theme): Component {
@@ -611,7 +642,7 @@ export default function piUiToolFoldExtension(pi: ExtensionAPI) {
               const groupMembers = groupIds
                 .map((id) => members.get(id))
                 .filter((m): m is MemberState => Boolean(m));
-              return renderSummaryLines(
+              return renderSummaryBox(
                 groupMembers,
                 width,
                 theme,
@@ -662,7 +693,7 @@ export default function piUiToolFoldExtension(pi: ExtensionAPI) {
           durationMs: options.isPartial ? undefined : context.durationMs ?? existing?.durationMs,
           target: existing?.target,
           shortTarget: existing?.shortTarget,
-          errorLine: context.isError ? extractFirstTextLine(result) : undefined,
+          errorLine: context.isError ? extractErrorLine(result) : undefined,
           imageCount: countImages(result),
           outputPad: context.outputPad,
           invalidate: context.invalidate,

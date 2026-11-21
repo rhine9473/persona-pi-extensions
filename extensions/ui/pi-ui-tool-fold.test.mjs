@@ -81,7 +81,7 @@ function createHarness({ expanded = false, mode = "tui", hasUI = true, branch = 
 
 const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, "");
 
-test("folds 3 tools into 1 high-contrast line with targets, checkmarks, and restores all on Ctrl+O", async () => {
+test("folds 3 tools into a translucent rounded box and restores all on Ctrl+O", async () => {
   const h = createHarness();
   await h.emit("session_start", {});
 
@@ -115,12 +115,15 @@ test("folds 3 tools into 1 high-contrast line with targets, checkmarks, and rest
   const l2 = c2.render(100);
   const l3 = c3.render(100);
 
-  assert.equal(l1.length, 2, `expected leading blank + 1 summary line, got ${JSON.stringify(l1)}`);
+  // Leading spacer + top border + body + bottom border = 4 lines
+  assert.equal(l1.length, 4, `expected rounded box, got ${JSON.stringify(l1)}`);
   assert.equal(l1[0], "");
-  assert.match(l1[1], /^ ▎✓ 3 calls · read a\.ts, b\.ts · bash npm test/);
+  assert.match(l1[1], /^ ╭─ ✓ 3 calls ─+ .* ─╮$/);
+  assert.match(l1[2], /^ │ read a\.ts, b\.ts · bash npm test\s+│$/);
+  assert.match(l1[3], /^ ╰─+╯$/);
   assert.equal(l2.length, 0, "second tool must fold to 0 lines");
   assert.equal(l3.length, 0, "third tool must fold to 0 lines");
-  assert.ok(visibleWidth(l1[1]) <= 100);
+  for (const line of l1) assert.ok(visibleWidth(line) <= 100);
 
   // Ctrl+O expand -> every tool renders its full native Box
   h.setExpanded(true);
@@ -129,17 +132,17 @@ test("folds 3 tools into 1 high-contrast line with targets, checkmarks, and rest
   assert.match(c2.render(100).map(stripAnsi).join("\n"), /CALL src\/b\.ts[\s\S]*RES ok2/);
   assert.match(c3.render(100).map(stripAnsi).join("\n"), /CALL npm test[\s\S]*RES ok3/);
 
-  // Ctrl+O collapse again -> returns to 1 summary line + 0 follower lines
+  // Ctrl+O collapse again -> returns to rounded box + 0 follower lines
   h.setExpanded(false);
   for (const c of [c1, c2, c3]) c.setExpanded(false);
-  assert.equal(c1.render(100).length, 2);
+  assert.equal(c1.render(100).length, 4);
   assert.equal(c2.render(100).length, 0);
   assert.equal(c3.render(100).length, 0);
 
   await h.emit("session_shutdown", {});
 });
 
-test("shows spinner while running, marks aborted on agent_end without checkmark, and expands error line", async () => {
+test("shows spinner while running, marks aborted without checkmark, and prefers real error line", async () => {
   const h = createHarness();
   await h.emit("session_start", {});
   await h.emit("message_end", {
@@ -160,37 +163,44 @@ test("shows spinner while running, marks aborted on agent_end without checkmark,
   c1.updateResult({ content: [{ type: "text", text: "done" }], durationMs: 100 }, false);
   c2.updateResult({ content: [{ type: "text", text: "partial" }], durationMs: 0 }, true);
 
-  const runningLine = stripAnsi(c1.render(100).join("\n"));
-  assert.match(runningLine, /▎[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] bash false/);
-  assert.match(runningLine, /1\/2/);
+  const runningText = stripAnsi(c1.render(100).join("\n"));
+  assert.match(runningText, /╭─ [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] bash/);
+  assert.match(runningText, /1\/2/);
 
   // Aborting mid-run must render ■ aborted, never ✓
   await h.emit("agent_end", {});
-  const abortedLine = stripAnsi(c1.render(100).join("\n"));
-  assert.match(abortedLine, /▎■ 2 calls/);
-  assert.match(abortedLine, /aborted/);
-  assert.doesNotMatch(abortedLine, /✓/);
+  const abortedText = stripAnsi(c1.render(100).join("\n"));
+  assert.match(abortedText, /╭─ ■ 2 calls/);
+  assert.match(abortedText, /aborted/);
+  assert.doesNotMatch(abortedText, /✓/);
 
-  // Error result renders ✕ + second line with first error line and expand hint
-  c2.updateResult({ content: [{ type: "text", text: "Command exited with code 1" }], isError: true, durationMs: 500 }, false);
+  // Error result skips banner stdout and surfaces real error line inside the box
+  c2.updateResult(
+    {
+      content: [{ type: "text", text: "> persona-pi-extensions@1.0.0 test\nError: Command exited with code 1" }],
+      isError: true,
+      durationMs: 500,
+    },
+    false,
+  );
   const errLines = c1.render(100).map(stripAnsi);
-  assert.equal(errLines.length, 3, "leading blank + header + error detail line");
-  assert.match(errLines[1], /▎✕ 2 calls · 1 failed/);
-  assert.match(errLines[2], /▎  bash: Command exited with code 1/);
-  assert.match(errLines[2], /展开/);
+  assert.equal(errLines.length, 5, "leading blank + top + targets + error detail + bottom");
+  assert.match(errLines[1], /╭─ ✕ 2 calls · 1 failed/);
+  assert.match(errLines[3], /bash: Error: Command exited with code 1/);
+  assert.match(errLines[3], /展开/);
 
   await h.emit("session_shutdown", {});
 });
 
-test("folds restored historical sessions and passes HTML export through untouched", async () => {
+test("folds restored historical sessions, keeps long path tail, and passes HTML export through", async () => {
   const branch = [
     {
       type: "message",
       message: {
         role: "assistant",
         content: [
-          { type: "toolCall", id: "h-1", name: "read" },
-          { type: "toolCall", id: "h-2", name: "edit" },
+          { type: "toolCall", id: "h-1", name: "edit" },
+          { type: "toolCall", id: "h-2", name: "read" },
         ],
       },
     },
@@ -206,19 +216,28 @@ test("folds restored historical sessions and passes HTML export through untouche
     renderResult: () => new Text("SELF_RES", 0, 0),
   };
   const ui = { requestRender: () => {} };
-  const c1 = new ToolExecutionComponent("read", "h-1", { path: "a.ts" }, {}, h.wrap("read", undefined), ui, process.cwd());
-  const c2 = new ToolExecutionComponent("edit", "h-2", { path: "b.ts" }, {}, h.wrap("edit", baseEdit), ui, process.cwd());
-  c1.updateResult({ content: [{ type: "text", text: "ok" }], durationMs: 120 }, false);
-  c2.updateResult({ content: [{ type: "text", text: "edited" }], durationMs: 250 }, false);
+  const c1 = new ToolExecutionComponent(
+    "edit",
+    "h-1",
+    { path: ".pi/agent/git/github.com/rhine9473/persona-pi-extensions/extensions/ui/pi-ui-tool-fold.ts" },
+    {},
+    h.wrap("edit", baseEdit),
+    ui,
+    process.cwd(),
+  );
+  const c2 = new ToolExecutionComponent("read", "h-2", { path: "b.ts" }, {}, h.wrap("read", undefined), ui, process.cwd());
+  c1.updateResult({ content: [{ type: "text", text: "edited" }], durationMs: 120 }, false);
+  c2.updateResult({ content: [{ type: "text", text: "ok" }], durationMs: 250 }, false);
 
   const summary = stripAnsi(c1.render(90).join("\n"));
-  assert.match(summary, /▎✓ 2 calls · read a\.ts · edit b\.ts/);
+  assert.match(summary, /╭─ ✓ 2 calls/);
+  assert.match(summary, /edit pi-ui-tool-fold\.ts · read b\.ts/);
   assert.equal(c2.render(90).length, 0);
 
   // Expanding self-shell edit preserves its self layout cleanly
   h.setExpanded(true);
-  c2.setExpanded(true);
-  assert.match(stripAnsi(c2.render(90).join("\n")), /SELF_CALL[\s\S]*SELF_RES/);
+  c1.setExpanded(true);
+  assert.match(stripAnsi(c1.render(90).join("\n")), /SELF_CALL[\s\S]*SELF_RES/);
 
   // Export path: executionStarted && argsComplete on first renderCall
   h.setExpanded(false);
