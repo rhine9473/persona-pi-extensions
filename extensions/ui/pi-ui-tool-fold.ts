@@ -1,4 +1,4 @@
-/** Per-response tool-call folding: collapses tools in one assistant message into a translucent 1px rounded box, while Ctrl+O restores full native details. */
+/** Per-response tool-call folding: collapses tools in one assistant message into a translucent full-width 1px rounded box, while Ctrl+O restores full native details. */
 import { basename, isAbsolute, relative } from "node:path";
 import type {
   AgentToolResult,
@@ -23,6 +23,7 @@ interface MemberState {
   durationMs?: number;
   target?: string;
   shortTarget?: string;
+  resultMeta?: string;
   errorLine?: string;
   imageCount: number;
   outputPad: number;
@@ -66,13 +67,20 @@ function clipPathTail(pathText: string, maxChars: number): string {
   if (pathText.length <= maxChars) return pathText;
   const normalized = pathText.replace(/\\/g, "/");
   const parts = normalized.split("/").filter(Boolean);
-  if (parts.length >= 2) {
-    const tail2 = `…/${parts.slice(-2).join("/")}`;
-    if (tail2.length <= maxChars) return tail2;
+  for (let take = Math.min(parts.length, 4); take >= 2; take--) {
+    const candidate = `…/${parts.slice(-take).join("/")}`;
+    if (candidate.length <= maxChars) return candidate;
   }
   const base = parts.at(-1) ?? pathText;
   if (`…/${base}`.length <= maxChars) return `…/${base}`;
   return clipText(base, maxChars);
+}
+
+function summarizeCommand(command: string): string {
+  const clean = sanitizeOneLine(command);
+  // Strip leading `cd <dir> && ` so the actual command stays visible instead of getting truncated inside a long path.
+  const stripped = clean.replace(/^cd\s+(?:"[^"]+"|'[^']+'|\S+)\s*(?:&&|;)\s*/i, "");
+  return stripped || clean;
 }
 
 function extractTargets(
@@ -85,33 +93,46 @@ function extractTargets(
   if (typeof rec.path === "string" && rec.path.trim()) {
     const full = displayPath(rec.path.trim(), cwd);
     const short = basename(full) || full;
-    return { target: clipPathTail(full, 56), shortTarget: clipText(short, 24) };
+    return { target: full, shortTarget: short };
   }
   if (typeof rec.command === "string" && rec.command.trim()) {
-    const cmd = sanitizeOneLine(rec.command);
-    return { target: clipText(cmd, 56), shortTarget: clipText(cmd, 24) };
+    const cmd = summarizeCommand(rec.command);
+    return { target: cmd, shortTarget: clipText(cmd, 36) };
   }
   if (typeof rec.pattern === "string" && rec.pattern.trim()) {
     const pat = sanitizeOneLine(rec.pattern);
-    return { target: clipText(pat, 40), shortTarget: clipText(pat, 20) };
+    return { target: pat, shortTarget: clipText(pat, 28) };
   }
   if (typeof rec.query === "string" && rec.query.trim()) {
     const q = sanitizeOneLine(rec.query);
-    return { target: clipText(q, 40), shortTarget: clipText(q, 20) };
+    return { target: q, shortTarget: clipText(q, 28) };
   }
   if (typeof rec.url === "string" && rec.url.trim()) {
     const url = sanitizeOneLine(rec.url);
-    return { target: clipText(url, 48), shortTarget: clipText(url, 24) };
+    return { target: url, shortTarget: clipText(url, 32) };
   }
   if (typeof rec.name === "string" && rec.name.trim()) {
     const n = sanitizeOneLine(rec.name);
-    return { target: clipText(n, 36), shortTarget: clipText(n, 20) };
+    return { target: n, shortTarget: clipText(n, 24) };
   }
   if (name === "subagent_spawn" && typeof rec.prompt === "string" && rec.prompt.trim()) {
     const p = sanitizeOneLine(rec.prompt);
-    return { target: clipText(p, 44), shortTarget: clipText(p, 22) };
+    return { target: p, shortTarget: clipText(p, 32) };
   }
   return {};
+}
+
+function extractResultMeta(name: string, result: AgentToolResult<unknown>): string | undefined {
+  let lineCount = 0;
+  for (const part of result.content ?? []) {
+    if (part.type === "text" && typeof part.text === "string" && part.text.trim()) {
+      lineCount += part.text.split(/\r?\n/).filter((l) => l.length > 0).length;
+    }
+  }
+  if ((name === "read" || name === "bash" || name === "grep" || name === "find") && lineCount > 0) {
+    return `${lineCount} 行`;
+  }
+  return undefined;
 }
 
 function extractErrorLine(result: AgentToolResult<unknown>): string | undefined {
@@ -125,7 +146,6 @@ function extractErrorLine(result: AgentToolResult<unknown>): string | undefined 
     }
   }
   if (lines.length === 0) return undefined;
-  // Prefer an explicit error/failure line near the end instead of initial banner stdout (e.g. `> pkg test`).
   const explicit = [...lines]
     .reverse()
     .find((l) => /\b(error|failed|exception|exited with code|enoent|eperm)\b|^(?:error:|✖|×|ERR!)/i.test(l));
@@ -209,8 +229,8 @@ function summarizeToolsWithTargets(items: readonly MemberState[], theme: Theme):
   for (const [name, info] of grouped.entries()) {
     const title = theme.fg("toolTitle", theme.bold(name));
     if (info.targets.length > 0) {
-      const shown = info.targets.slice(0, 2).join(", ");
-      const extra = info.count - Math.min(info.targets.length, 2);
+      const shown = info.targets.slice(0, 4).join(", ");
+      const extra = info.count - Math.min(info.targets.length, 4);
       const extraText = extra > 0 ? theme.fg("dim", ` +${extra}`) : "";
       segments.push(`${title} ${theme.fg("text", shown)}${extraText}`);
     } else {
@@ -244,11 +264,16 @@ function renderSummaryBox(
   const totalImages = items.reduce((sum, m) => sum + m.imageCount, 0);
   const elapsed = groupElapsedMs(items, now);
   const elapsedStr = elapsed !== undefined ? formatDuration(elapsed) : "";
-  const maxBoxWidth = Math.max(24, width - outputPad * 2);
+
+  const boxWidth = Math.max(24, width - outputPad * 2);
+  const innerWidth = Math.max(10, boxWidth - 2);
+  const targetMax = Math.max(24, innerWidth - 4);
+  const formatSingleTarget = (m: MemberState) =>
+    m.target ? (m.name === "bash" ? clipText(m.target, targetMax) : clipPathTail(m.target, targetMax)) : undefined;
 
   let borderToken: "border" | "warning" | "error" | "borderMuted" = "border";
   let titleText = "";
-  let rightMetaParts: string[] = [];
+  const rightMetaParts: string[] = [];
   const bodyLines: string[] = [];
 
   if (running.length > 0) {
@@ -257,7 +282,8 @@ function renderSummaryBox(
     if (running.length === 1) {
       const active = running[0]!;
       titleText = `${theme.fg("warning", frame)} ${theme.fg("toolTitle", theme.bold(active.name))}`;
-      if (active.target) bodyLines.push(` ${theme.fg("text", active.target)}`);
+      const tgt = formatSingleTarget(active);
+      if (tgt) bodyLines.push(` ${theme.fg("text", tgt)}`);
     } else {
       titleText = `${theme.fg("warning", frame)} ${theme.fg("toolTitle", theme.bold(`${running.length} running`))}`;
       bodyLines.push(` ${summarizeToolsWithTargets(items, theme)}`);
@@ -273,7 +299,8 @@ function renderSummaryBox(
     if (items.length === 1) {
       const only = items[0]!;
       titleText = `${theme.fg("dim", "◌")} ${theme.fg("toolTitle", theme.bold(only.name))}`;
-      if (only.target) bodyLines.push(` ${theme.fg("text", only.target)}`);
+      const tgt = formatSingleTarget(only);
+      if (tgt) bodyLines.push(` ${theme.fg("text", tgt)}`);
     } else {
       titleText = `${theme.fg("dim", "◌")} ${theme.fg("muted", `${items.length} calls`)}`;
       bodyLines.push(` ${summarizeToolsWithTargets(items, theme)}`);
@@ -283,7 +310,9 @@ function renderSummaryBox(
     const firstErr = errors[0]!;
     if (items.length === 1) {
       titleText = `${theme.fg("error", "✕")} ${theme.fg("error", theme.bold(firstErr.name))}`;
-      if (firstErr.target) bodyLines.push(` ${theme.fg("text", firstErr.target)}`);
+      const tgt = formatSingleTarget(firstErr);
+      if (tgt) bodyLines.push(` ${theme.fg("text", tgt)}`);
+      if (firstErr.resultMeta) rightMetaParts.push(firstErr.resultMeta);
     } else {
       titleText = `${theme.fg("error", "✕")} ${theme.fg("text", `${items.length} calls`)} ${theme.fg("error", `· ${errors.length} failed`)}`;
       bodyLines.push(` ${summarizeToolsWithTargets(items, theme)}`);
@@ -291,7 +320,7 @@ function renderSummaryBox(
     const errMsg = firstErr.errorLine ? `${firstErr.name}: ${firstErr.errorLine}` : `${firstErr.name} failed`;
     const expandHint = keyHint ? keyHint("app.tools.expand", "展开") : "";
     bodyLines.push(
-      ` ${theme.fg("error", clipText(errMsg, 72))}${expandHint ? `${sep}${expandHint}` : ""}`,
+      ` ${theme.fg("error", clipText(errMsg, Math.max(24, targetMax - 14)))}${expandHint ? `${sep}${expandHint}` : ""}`,
     );
     if (totalImages > 0) rightMetaParts.push(`${totalImages} image${totalImages > 1 ? "s" : ""}`);
     if (elapsedStr) rightMetaParts.push(elapsedStr);
@@ -300,7 +329,8 @@ function renderSummaryBox(
     if (items.length === 1) {
       const only = items[0]!;
       titleText = `${theme.fg("muted", "■")} ${theme.fg("toolTitle", theme.bold(only.name))}`;
-      if (only.target) bodyLines.push(` ${theme.fg("text", only.target)}`);
+      const tgt = formatSingleTarget(only);
+      if (tgt) bodyLines.push(` ${theme.fg("text", tgt)}`);
     } else {
       titleText = `${theme.fg("muted", "■")} ${theme.fg("text", `${items.length} calls`)}`;
       bodyLines.push(` ${summarizeToolsWithTargets(items, theme)}`);
@@ -312,7 +342,9 @@ function renderSummaryBox(
     if (items.length === 1) {
       const only = items[0]!;
       titleText = `${theme.fg("success", "✓")} ${theme.fg("toolTitle", theme.bold(only.name))}`;
-      if (only.target) bodyLines.push(` ${theme.fg("text", only.target)}`);
+      const tgt = formatSingleTarget(only);
+      if (tgt) bodyLines.push(` ${theme.fg("text", tgt)}`);
+      if (only.resultMeta) rightMetaParts.push(only.resultMeta);
     } else {
       titleText = `${theme.fg("success", "✓")} ${theme.fg("text", `${items.length} calls`)}`;
       bodyLines.push(` ${summarizeToolsWithTargets(items, theme)}`);
@@ -324,11 +356,6 @@ function renderSummaryBox(
   const titlePart = ` ${titleText} `;
   const metaText = rightMetaParts.join(" · ");
   const metaPart = metaText ? ` ${metaText} ` : "";
-  const minTopWidth = visibleWidth(titlePart) + visibleWidth(metaPart) + 6;
-  const maxContentWidth = bodyLines.reduce((max, line) => Math.max(max, visibleWidth(line) + 1), 0);
-  const desiredBoxWidth = Math.max(38, minTopWidth, maxContentWidth + 2);
-  const boxWidth = Math.min(maxBoxWidth, desiredBoxWidth);
-  const innerWidth = Math.max(10, boxWidth - 2);
 
   const clippedTitle = truncateToWidth(titlePart, Math.max(6, innerWidth - visibleWidth(metaPart) - 3), "…");
   const fillCount = Math.max(1, innerWidth - visibleWidth(clippedTitle) - visibleWidth(metaPart) - 2);
@@ -565,7 +592,6 @@ export default function piUiToolFoldExtension(pi: ExtensionAPI) {
         const slot = getToolFoldState(context.state as Record<string, unknown>);
         if (!slot.initialized) {
           slot.initialized = true;
-          // In live TUI, renderCall always starts before executionStarted; in HTML export, both are already true.
           slot.isExport = Boolean(context.executionStarted && context.argsComplete);
         }
         slot.latestContext = context;
@@ -600,6 +626,7 @@ export default function piUiToolFoldExtension(pi: ExtensionAPI) {
           durationMs: existing?.durationMs,
           target: target ?? existing?.target,
           shortTarget: shortTarget ?? existing?.shortTarget,
+          resultMeta: existing?.resultMeta,
           errorLine: existing?.errorLine,
           imageCount: existing?.imageCount ?? 0,
           outputPad: context.outputPad,
@@ -693,6 +720,7 @@ export default function piUiToolFoldExtension(pi: ExtensionAPI) {
           durationMs: options.isPartial ? undefined : context.durationMs ?? existing?.durationMs,
           target: existing?.target,
           shortTarget: existing?.shortTarget,
+          resultMeta: options.isPartial ? existing?.resultMeta : extractResultMeta(toolName, result),
           errorLine: context.isError ? extractErrorLine(result) : undefined,
           imageCount: countImages(result),
           outputPad: context.outputPad,

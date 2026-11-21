@@ -123,7 +123,8 @@ test("folds 3 tools into a translucent rounded box and restores all on Ctrl+O", 
   assert.match(l1[3], /^ ╰─+╯$/);
   assert.equal(l2.length, 0, "second tool must fold to 0 lines");
   assert.equal(l3.length, 0, "third tool must fold to 0 lines");
-  for (const line of l1) assert.ok(visibleWidth(line) <= 100);
+  for (const line of l1) assert.equal(visibleWidth(line) <= 100, true);
+  assert.equal(visibleWidth(l1[1]), 99, "1 left pad + full 98-col boxWidth");
 
   // Ctrl+O expand -> every tool renders its full native Box
   h.setExpanded(true);
@@ -217,27 +218,35 @@ test("folds restored historical sessions, keeps long path tail, and passes HTML 
   };
   const ui = { requestRender: () => {} };
   const c1 = new ToolExecutionComponent(
-    "edit",
+    "bash",
     "h-1",
-    { path: ".pi/agent/git/github.com/rhine9473/persona-pi-extensions/extensions/ui/pi-ui-tool-fold.ts" },
+    { command: 'cd "C:/Users/Lenovo/.pi/agent/git/github.com/rhine9473/persona-pi-extensions" && npm test && git push origin main' },
     {},
-    h.wrap("edit", baseEdit),
+    h.wrap("bash", undefined),
     ui,
     process.cwd(),
   );
   const c2 = new ToolExecutionComponent("read", "h-2", { path: "b.ts" }, {}, h.wrap("read", undefined), ui, process.cwd());
-  c1.updateResult({ content: [{ type: "text", text: "edited" }], durationMs: 120 }, false);
+  c1.updateResult({ content: [{ type: "text", text: "ok" }], durationMs: 120 }, false);
   c2.updateResult({ content: [{ type: "text", text: "ok" }], durationMs: 250 }, false);
 
-  const summary = stripAnsi(c1.render(90).join("\n"));
+  const summary = stripAnsi(c1.render(120).join("\n"));
   assert.match(summary, /╭─ ✓ 2 calls/);
-  assert.match(summary, /edit pi-ui-tool-fold\.ts · read b\.ts/);
-  assert.equal(c2.render(90).length, 0);
+  assert.match(summary, /bash npm test && git push origin main · read b\.ts/);
+  assert.equal(c2.render(120).length, 0);
 
-  // Expanding self-shell edit preserves its self layout cleanly
-  h.setExpanded(true);
-  c1.setExpanded(true);
-  assert.match(stripAnsi(c1.render(90).join("\n")), /SELF_CALL[\s\S]*SELF_RES/);
+  // Expanding single self-shell edit preserves its self layout cleanly
+  const h2 = createHarness({
+    branch: [
+      { type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "s-1", name: "edit" }] } },
+    ],
+  });
+  await h2.emit("session_start", {});
+  const cSelf = new ToolExecutionComponent("edit", "s-1", { path: "b.ts" }, {}, h2.wrap("edit", baseEdit), ui, process.cwd());
+  cSelf.updateResult({ content: [{ type: "text", text: "edited" }], durationMs: 100 }, false);
+  h2.setExpanded(true);
+  cSelf.setExpanded(true);
+  assert.match(stripAnsi(cSelf.render(90).join("\n")), /SELF_CALL[\s\S]*SELF_RES/);
 
   // Export path: executionStarted && argsComplete on first renderCall
   h.setExpanded(false);
