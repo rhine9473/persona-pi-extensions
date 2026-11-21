@@ -109,6 +109,18 @@ const ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION =
 
 const CONTINUATION_TEXT = "Continue the active task using the available instructions and context.";
 const PLACEHOLDER_SYSTEM_TURN_TEXT = "Apply the active system instructions.";
+const SUMMARIZATION_PROMPT_PREFIX = "You are a context summarization assistant.";
+const SUMMARIZATION_MAX_OUTPUT_TOKENS = 32_768;
+
+function isSummarizationRequest(
+  rawSystemPromptText: string | undefined,
+  declaredTools: Tool[] | undefined,
+): boolean {
+  return (
+    (!declaredTools || declaredTools.length === 0) &&
+    Boolean(rawSystemPromptText?.trimStart().startsWith(SUMMARIZATION_PROMPT_PREFIX))
+  );
+}
 
 /**
  * Largest `systemInstruction` budget some consumer endpoints accept before
@@ -290,9 +302,12 @@ function withoutSkillBlocks(text: string): string {
   return text.replace(SKILL_BLOCK_PATTERN, "");
 }
 
-function asTextParts(content: unknown): Array<GeminiTextPart | GeminiInlineDataPart> {
+function asTextParts(
+  content: unknown,
+  preserveSkillBlocks = false,
+): Array<GeminiTextPart | GeminiInlineDataPart> {
   const textPart = (text: string): GeminiTextPart[] => {
-    const userText = withoutSkillBlocks(text);
+    const userText = preserveSkillBlocks ? text : withoutSkillBlocks(text);
     return userText.trim() ? [{ text: sanitizeText(userText) }] : [];
   };
   if (typeof content === "string") return textPart(content);
@@ -351,6 +366,7 @@ function convertMessagesWithMetadata(
   model: Model<Api>,
   context: Context,
   runtimeModel: string,
+  preserveSkillBlocks = false,
 ): { contents: GeminiContent[]; hasDegradedToolObservations: boolean } {
   const contents: GeminiContent[] = [];
   let hasDegradedToolObservations = false;
@@ -360,7 +376,7 @@ function convertMessagesWithMetadata(
   for (const msg of context.messages) {
     if ((msg.role as string) === "system") continue;
     if (msg.role === "user") {
-      const parts = asTextParts(msg.content);
+      const parts = asTextParts(msg.content, preserveSkillBlocks);
       appendTurn(contents, GeminiRole.User, parts);
     } else if (msg.role === "assistant") {
       if (msg.stopReason === "error" || msg.stopReason === "aborted") {
@@ -1125,14 +1141,15 @@ export function buildRequest(
   options: AntigravityStreamOptions,
   runtimeModel: string,
 ): AntigravityGenerateRequest {
-  const injectedSkills = context.messages.flatMap((msg) =>
-    msg.role === "user" ? skillBlocks(msg.content) : [],
-  );
   const rawSystemPromptText = resolveCurrentSystemPrompt(context);
   const systemPromptText = rawSystemPromptText
     ? sanitizeSystemPrompt(rawSystemPromptText)
     : undefined;
   const declaredTools = resolveCurrentTools(context);
+  const isSummary = isSummarizationRequest(rawSystemPromptText, declaredTools);
+  const injectedSkills = isSummary
+    ? []
+    : context.messages.flatMap((msg) => (msg.role === "user" ? skillBlocks(msg.content) : []));
   const systemParts = systemPromptText
     ? [{ text: sanitizeText(systemPromptText) }]
     : [
@@ -1145,6 +1162,7 @@ export function buildRequest(
     model,
     context,
     runtimeModel,
+    isSummary,
   );
   if (systemPromptText && hasDegradedToolObservations) {
     systemParts.push({ text: ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION });
@@ -1190,7 +1208,10 @@ export function buildRequest(
   if (options.maxTokens !== undefined) {
     generationConfig.maxOutputTokens = Math.min(options.maxTokens, maxAllowed);
   } else {
-    generationConfig.maxOutputTokens = Math.min(maxAllowed, model.maxTokens || maxAllowed);
+    const targetMax = Math.min(maxAllowed, model.maxTokens || maxAllowed);
+    generationConfig.maxOutputTokens = isSummary
+      ? Math.min(targetMax, SUMMARIZATION_MAX_OUTPUT_TOKENS)
+      : targetMax;
   }
   if (Object.keys(generationConfig).length) request.generationConfig = generationConfig;
 
@@ -1370,7 +1391,7 @@ export function friendlyAntigravityError(status: number | undefined, text: strin
     if (/Individual quota reached/i.test(msg)) {
       const hint = isCreditsEnabled()
         ? " (AI credits overage active; credit balance may be depleted)"
-        : " (Enable AI credits fallback with /antigravity.credits on)";
+        : " (Enable AI credits fallback with /agy credits on)";
       return `Quota reached. Please wait ${wait || "for reset"}.${hint} Next: switch models or try again after reset.`;
     }
     // Google answers a real quota wall with a "Resets in …" hint, but uses generic
@@ -1386,7 +1407,7 @@ export function friendlyAntigravityError(status: number | undefined, text: strin
     if (hardLimit) {
       const hint = isCreditsEnabled()
         ? " (AI credits overage active; credit balance may be depleted)"
-        : " (Enable AI credits fallback with /antigravity.credits on)";
+        : " (Enable AI credits fallback with /agy credits on)";
       return `Quota reached.${wait ? ` Please wait ${wait}.` : ""}${hint} Next: switch models or retry later.`;
     }
     if (/rate.?limit|too many requests/i.test(msg)) {
@@ -2245,7 +2266,7 @@ export function streamAntigravity(
                 }
               }
             }
-            if (response?.status === 429 && isGenericResourceExhausted(lastText)) {
+            if (isCapacityFailure(response?.status, lastText)) {
               const nextSibling = advertisedSiblingRuntimes(runtimeModel).find(
                 (id) => !runtimeCandidates.includes(id),
               );
@@ -2358,16 +2379,17 @@ export function streamAntigravity(
             }
           }
           // A capacity refusal says nothing about the model yet: the same request
-          // succeeds once the shared pool drains. After one cache-preserving retry
-          // on the current account, try another healthy account before walking the
-          // deeper backoff steps on a single congested account.
+          // succeeds once the shared pool drains. After two queue-preserving retries
+          // on the current account, borrow another healthy account temporarily without
+          // permanently overwriting the user's sticky primary account.
           if (isCapacityFailure(response?.status, lastText)) {
-            if (!exhaustedAccountFailover && (capacityAttempt >= 1 || capacityAttempt >= capacityAttempts - 1)) {
+            if (!exhaustedAccountFailover && (capacityAttempt >= 2 || capacityAttempt >= capacityAttempts - 1)) {
               const next = await failoverToNextAccount(triedAccessTokens, {
                 pool,
                 failedToken: creds.token,
                 cooldownUntil: Date.now() + 60_000,
                 cooldownEstimated: true,
+                preserveActiveAccount: true,
                 reason: `${poolDisplayName(pool)} 池持续拥堵，临时冷却 1 分钟`,
               });
               if (next) {

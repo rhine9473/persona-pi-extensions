@@ -105,7 +105,7 @@ export function getCreditsStatus(): CreditsStatus {
   return {
     enabled: false,
     source: "default",
-    detail: "Default (disabled; enable with /antigravity.credits on)",
+    detail: "Default (disabled; enable with /agy credits on)",
   };
 }
 

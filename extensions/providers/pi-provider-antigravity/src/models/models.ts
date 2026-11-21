@@ -413,7 +413,7 @@ export function getAntigravityRequestModelId(modelId: string, effort: string | u
     ANTIGRAVITY_ROUTING[modelId]
   ) {
     throw new Error(
-      `Antigravity model ${modelId} is absent from the current catalog. Next: run /antigravity.refresh and select an available model.`,
+      `Antigravity model ${modelId} is absent from the current catalog. Next: run /agy refresh and select an available model.`,
     );
   }
   const r = currentRouting[modelId];

@@ -305,92 +305,33 @@ export default function (pi: ExtensionAPI): void {
         return;
       }
       if (cmd === "accounts") {
+        const sub = (tokens[1] ?? "").toLowerCase();
+        const target = tokens.slice(2).join(" ");
+        if (sub === "switch" && target) {
+          try {
+            const acc = await activateAccount(target);
+            emitText(ctx, `已切换至 ${acc.email || acc.accountId}`);
+          } catch (e) {
+            emitText(ctx, e instanceof Error ? e.message : String(e), "error");
+          }
+          return;
+        }
+        if (sub === "remove" && target) {
+          try {
+            const next = await removeAccount(target);
+            emitText(
+              ctx,
+              next ? `已解绑账号，当前激活：${next.email || next.accountId}` : "已解绑账号",
+            );
+          } catch (e) {
+            emitText(ctx, e instanceof Error ? e.message : String(e), "error");
+          }
+          return;
+        }
         await openOrPrint(ctx, "accounts", { json });
         return;
       }
       await openOrPrint(ctx, loadAntigravitySettings().lastTab ?? "accounts", { json });
-    },
-  });
-
-  pi.registerCommand("antigravity.usage", {
-    description: "查看所有 Antigravity 账号额度（打开控制台并刷新）",
-    handler: async (args, ctx) => {
-      const json = args.includes("--json");
-      await openOrPrint(ctx, "accounts", { refreshOnOpen: true, json });
-    },
-  });
-
-  pi.registerCommand("antigravity.models", {
-    description: "查看 Antigravity 可用模型与思考档位",
-    handler: async (args, ctx) => {
-      const json = args.includes("--json");
-      await openOrPrint(ctx, "models", { json });
-    },
-  });
-
-  pi.registerCommand("antigravity.accounts", {
-    description: "管理、切换或解绑 Antigravity 账号",
-    handler: async (args, ctx) => {
-      const trimmed = args.trim();
-      if (trimmed.startsWith("switch ")) {
-        try {
-          const acc = await activateAccount(trimmed.slice("switch ".length));
-          emitText(ctx, `已切换至 ${acc.email || acc.accountId}`);
-        } catch (e) {
-          emitText(ctx, e instanceof Error ? e.message : String(e), "error");
-        }
-        return;
-      }
-      if (trimmed.startsWith("remove ")) {
-        try {
-          const next = await removeAccount(trimmed.slice("remove ".length));
-          emitText(
-            ctx,
-            next ? `已解绑账号，当前激活：${next.email || next.accountId}` : "已解绑账号",
-          );
-        } catch (e) {
-          emitText(ctx, e instanceof Error ? e.message : String(e), "error");
-        }
-        return;
-      }
-      await openOrPrint(ctx, "accounts", { json: trimmed.includes("--json") });
-    },
-  });
-
-  pi.registerCommand("antigravity.credits", {
-    description: "查看或开关 AI 积分超额兜底 (/antigravity.credits [on|off])",
-    handler: async (args, ctx) => {
-      const mode = args.trim().toLowerCase();
-      if (mode === "on" || mode === "enable" || mode === "1" || mode === "true") {
-        setCreditsEnabled(true);
-        emitText(ctx, "AI 积分超额兜底已开启");
-        return;
-      }
-      if (mode === "off" || mode === "disable" || mode === "0" || mode === "false") {
-        setCreditsEnabled(false);
-        emitText(ctx, "AI 积分超额兜底已关闭");
-        return;
-      }
-      if (!ctx.hasUI) {
-        const st = getCreditsStatus();
-        emitText(ctx, `AI 积分超额：${st.enabled ? "开" : "关"} (${st.detail})`);
-        return;
-      }
-      await openOrPrint(ctx, "diagnostics", { focusCredits: true });
-    },
-  });
-
-  pi.registerCommand("antigravity.refresh", {
-    description: "强制刷新 Antigravity 模型目录",
-    handler: async (_args, ctx) => {
-      await runRefreshCatalog(ctx);
-    },
-  });
-
-  pi.registerCommand("antigravity.doctor", {
-    description: "打开 Antigravity 诊断与设置页",
-    handler: async (args, ctx) => {
-      await openOrPrint(ctx, "diagnostics", { json: args.includes("--json") });
     },
   });
 }

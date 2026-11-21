@@ -62,6 +62,7 @@ export type FailoverOptions = {
   failedToken?: string;
   cooldownUntil?: number;
   cooldownEstimated?: boolean;
+  preserveActiveAccount?: boolean;
   authStatus?: AccountAuthStatus;
   authError?: string;
   verifyUrl?: string;
@@ -730,6 +731,9 @@ export async function selectAccountForRequest(
 
   const settings = loadAntigravitySettings();
   const currentActive = store.activeAccountId ? store.accounts[store.activeAccountId] : undefined;
+  const currentActiveCooldown = currentActive
+    ? isAccountCoolingForPool(currentActive, pool, now)
+    : undefined;
   let chosen: StoredAccount | undefined;
 
   if (settings.strategy === "sticky") {
@@ -757,9 +761,17 @@ export async function selectAccountForRequest(
       fresh.lastUsedAt = Date.now();
       store.accounts[fresh.accountId] = fresh;
       const switched = currentActive && currentActive.accountId !== fresh.accountId;
-      store.activeAccountId = fresh.accountId;
+      const temporaryBypass = Boolean(
+        switched &&
+          settings.strategy === "sticky" &&
+          currentActiveCooldown?.estimated === true &&
+          (currentActive?.authStatus ?? "ready") === "ready",
+      );
+      if (!temporaryBypass) {
+        store.activeAccountId = fresh.accountId;
+      }
       saveAccountStore(store);
-      if (switched) {
+      if (switched && !temporaryBypass) {
         writeActiveCredential(fresh);
         if (settings.strategy === "sticky" && currentActive) {
           const reason =
@@ -778,6 +790,8 @@ export async function selectAccountForRequest(
         } else {
           notifyAccountsChanged();
         }
+      } else if (temporaryBypass) {
+        notifyAccountsChanged();
       }
       return {
         kind: "selected",
@@ -844,9 +858,13 @@ export async function failoverToNextAccount(
       if (!account.access || triedAccessTokens.has(account.access)) continue;
       account.lastUsedAt = Date.now();
       store.accounts[account.accountId] = account;
-      store.activeAccountId = account.accountId;
+      if (!opts.preserveActiveAccount) {
+        store.activeAccountId = account.accountId;
+      }
       saveAccountStore(store);
-      writeActiveCredential(account);
+      if (!opts.preserveActiveAccount) {
+        writeActiveCredential(account);
+      }
 
       if (failedAccount) {
         recordFailoverEvent({

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import {
+  buildRequest,
   capacityAttemptLimit,
   clearCapacityRouteCache,
   isCapacityFailure,
@@ -188,8 +189,8 @@ try {
 
   assert.equal(isGenericResourceExhausted("Resource has been exhausted (e.g. check quota)."), true);
 
-  // Multi-account capacity failover: switches to healthy second account after 1 short retry
-  // instead of burning through the full 5-attempt ladder on the first congested account.
+  // Multi-account capacity failover: borrows healthy second account after 2 queue retries
+  // without permanently overwriting the user's sticky primary account.
   clearCapacityRouteCache();
   process.env.PI_CODING_AGENT_DIR = join(isolatedHome, "agent");
   const { mkdirSync } = await import("node:fs");
@@ -229,8 +230,86 @@ try {
   const firstAcctHits = seenTokens.filter((t) => t === "cap-tok-1").length;
   assert.ok(
     firstAcctHits < 5 * 8,
-    `expected failover after 2 passes on first account, not full 5-attempt ladder (hits=${firstAcctHits})`,
+    `expected failover after 3 passes on first account, not full 5-attempt ladder (hits=${firstAcctHits})`,
   );
+
+  // Sticky primary account must remain active while temporary capacity cooldown is active,
+  // and recover automatically once cooldown is cleared.
+  const { listAccounts, selectAccountForRequest, clearAccountCooldown } = await import("../src/auth/accounts.js");
+  assert.equal(
+    listAccounts().find((a) => a.email === "cap-first@gmail.com")?.active,
+    true,
+    "temporary capacity failover should preserve sticky primary account",
+  );
+  const duringCooldown = await selectAccountForRequest("gemini-4-hydrogen", "cap-tok-1");
+  assert.equal(duringCooldown.kind, "selected");
+  if (duringCooldown.kind === "selected") {
+    assert.equal(duringCooldown.account.email, "cap-second@gmail.com");
+  }
+  assert.equal(
+    listAccounts().find((a) => a.email === "cap-first@gmail.com")?.active,
+    true,
+    "sticky primary stays preserved during temporary capacity bypass",
+  );
+  clearAccountCooldown("cap-first@gmail.com");
+  const afterCooldown = await selectAccountForRequest("gemini-4-hydrogen", "cap-tok-1");
+  assert.equal(afterCooldown.kind, "selected");
+  if (afterCooldown.kind === "selected") {
+    assert.equal(afterCooldown.account.email, "cap-first@gmail.com", "sticky primary resumes once cooldown expires");
+  }
+
+  // Compaction / summarization request caps maxOutputTokens at 32768 without downgrading model,
+  // and leaves <skill> tags inside <conversation> untouched.
+  const hydroModel = {
+    ...model,
+    id: "gemini-4-hydrogen",
+    name: "Gemini 4 Hydrogen (Antigravity)",
+    maxTokens: 262144,
+  } as Model<Api>;
+  const summaryReq = buildRequest(
+    hydroModel,
+    {
+      systemPrompt: "You are a context summarization assistant. Summarize cleanly.",
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: "<conversation>\n<skill>keep me</skill>\n</conversation>" }],
+          timestamp: Date.now(),
+        },
+      ],
+    },
+    "p-1",
+    { reasoning: "high" },
+    "gemini-4-hydrogen-high",
+  );
+  assert.equal(summaryReq.model, "gemini-4-hydrogen-high");
+  assert.equal(summaryReq.request.generationConfig?.maxOutputTokens, 32768);
+  const firstUserText = summaryReq.request.contents
+    .flatMap((c) => c.parts)
+    .map((p) => ("text" in p ? p.text : ""))
+    .join("\n");
+  assert.match(firstUserText, /<conversation>[\s\S]*<skill>keep me<\/skill>[\s\S]*<\/conversation>/);
+
+  // 503 No capacity available walks sibling tiers before giving up.
+  clearCapacityRouteCache();
+  process.env.ANTIGRAVITY_CAPACITY_BACKOFF_MS = "1";
+  const seen503Models: string[] = [];
+  globalThis.fetch = (async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    const reqModel = String(body.model ?? "");
+    seen503Models.push(reqModel);
+    if (reqModel !== "gemini-3.8-flash-medium") {
+      return new Response('{"error":{"code":503,"message":"No capacity available"}}', { status: 503 });
+    }
+    return new Response(OK_STREAM);
+  }) as typeof fetch;
+  const recovered503 = await streamAntigravity(
+    model,
+    { messages: [] },
+    { apiKey: JSON.stringify({ token: "standalone-tok", projectId: "p-s" }), reasoning: "high", sessionId: "cap-503" },
+  ).result();
+  assert.equal(recovered503.stopReason, "stop", recovered503.errorMessage);
+  assert.ok(seen503Models.includes("gemini-3.8-flash-medium"), "503 should walk sibling tiers");
 } finally {
   delete process.env.PI_CODING_AGENT_DIR;
   restoreEnv();

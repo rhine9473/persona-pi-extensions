@@ -115,7 +115,7 @@ try {
   for (const retired of ["gemini-3.6-flash", "gemini-3.7-flash"]) {
     assert.throws(
       () => getAntigravityRequestModelId(retired, "medium"),
-      /absent from the current catalog.*\/antigravity.refresh/,
+      /absent from the current catalog.*\/agy refresh/,
       "retired selections must not recover static runtime routes",
     );
   }

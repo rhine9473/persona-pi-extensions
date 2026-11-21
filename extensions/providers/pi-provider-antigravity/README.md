@@ -27,13 +27,15 @@ pi install git:github.com/rhine9473/pi-antigravity
 
 ## 命令
 
-- `/agy` — 打开控制台（支持补全 `accounts`、`usage`、`models`、`doctor`、`refresh`、`credits on|off`、`--json`）
-- `/antigravity.accounts` — 直接打开账号管理页（兼容 `switch <序号|邮箱>` / `remove <序号|邮箱>`）
-- `/antigravity.usage` — 打开账号页并刷新全部账号额度
-- `/antigravity.models` — 打开模型与思考档位页
-- `/antigravity.doctor` — 打开诊断与设置页
-- `/antigravity.credits [on|off]` — 开关 AI 积分超额兜底
-- `/antigravity.refresh` — 强制同步模型目录
+统一只保留一个 `/agy` 入口（支持命令行参数补全）：
+
+- `/agy` — 打开控制台（默认进入上次标签页）
+- `/agy accounts` — 账号管理页（支持 `switch <序号|邮箱>` / `remove <序号|邮箱>`）
+- `/agy usage` — 打开账号页并刷新全部账号额度
+- `/agy models` — 打开模型与思考档位页
+- `/agy doctor` — 打开诊断与设置页
+- `/agy credits [on|off]` — 开关 AI 积分超额兜底
+- `/agy refresh` — 强制同步模型目录
 
 ## 风险说明
 
