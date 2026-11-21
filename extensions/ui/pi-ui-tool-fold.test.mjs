@@ -7,9 +7,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../..");
 
-const hostRoot = process.env.PI_TEST_HOST || (process.env.APPDATA
-  ? path.join(process.env.APPDATA, "npm/node_modules/@earendil-works/pi-coding-agent")
-  : path.join(repoRoot, "node_modules/@earendil-works/pi-coding-agent"));
+const hostRoot =
+  process.env.PI_TEST_HOST ||
+  (process.env.APPDATA
+    ? path.join(process.env.APPDATA, "npm/node_modules/@earendil-works/pi-coding-agent")
+    : path.join(repoRoot, "node_modules/@earendil-works/pi-coding-agent"));
 const hostRequire = createRequire(path.join(hostRoot, "package.json"));
 const tuiPath = hostRequire.resolve("@earendil-works/pi-tui");
 const { Text, visibleWidth } = await import(pathToFileURL(tuiPath).href);
@@ -32,7 +34,7 @@ const jiti = createJiti(import.meta.url, {
     "@earendil-works/pi-coding-agent": path.join(hostRoot, "dist/index.js"),
   },
 });
-const { default: piUiTidyExtension } = await jiti.import(path.join(here, "pi-ui-tidy.ts"));
+const { default: piUiToolFoldExtension } = await jiti.import(path.join(here, "pi-ui-tool-fold.ts"));
 
 function createHarness({ expanded = false, mode = "tui", hasUI = true, branch = [] } = {}) {
   let toolsExpanded = expanded;
@@ -47,7 +49,7 @@ function createHarness({ expanded = false, mode = "tui", hasUI = true, branch = 
       resolver = fn;
     },
   };
-  piUiTidyExtension(pi);
+  piUiToolFoldExtension(pi);
   const ctx = {
     mode,
     hasUI,
@@ -79,7 +81,7 @@ function createHarness({ expanded = false, mode = "tui", hasUI = true, branch = 
 
 const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, "");
 
-test("collapses 3 tools in one assistant message to 1 summary line and restores all on Ctrl+O", async () => {
+test("folds 3 tools into 1 high-contrast line with targets, checkmarks, and restores all on Ctrl+O", async () => {
   const h = createHarness();
   await h.emit("session_start", {});
 
@@ -100,8 +102,8 @@ test("collapses 3 tools in one assistant message to 1 summary line and restores 
   });
 
   const ui = { requestRender: () => {} };
-  const c1 = new ToolExecutionComponent("read", "tc-1", { path: "a.ts" }, {}, h.wrap("read", baseDef), ui, process.cwd());
-  const c2 = new ToolExecutionComponent("read", "tc-2", { path: "b.ts" }, {}, h.wrap("read", baseDef), ui, process.cwd());
+  const c1 = new ToolExecutionComponent("read", "tc-1", { path: "src/a.ts" }, {}, h.wrap("read", baseDef), ui, process.cwd());
+  const c2 = new ToolExecutionComponent("read", "tc-2", { path: "src/b.ts" }, {}, h.wrap("read", baseDef), ui, process.cwd());
   const c3 = new ToolExecutionComponent("bash", "tc-3", { command: "npm test" }, {}, h.wrap("bash", baseDef), ui, process.cwd());
 
   for (const c of [c1, c2, c3]) c.markExecutionStarted();
@@ -109,37 +111,35 @@ test("collapses 3 tools in one assistant message to 1 summary line and restores 
   c2.updateResult({ content: [{ type: "text", text: "ok2" }], durationMs: 300 }, false);
   c3.updateResult({ content: [{ type: "text", text: "ok3" }], durationMs: 1200 }, false);
 
-  const l1 = c1.render(80).map(stripAnsi);
-  const l2 = c2.render(80);
-  const l3 = c3.render(80);
+  const l1 = c1.render(100).map(stripAnsi);
+  const l2 = c2.render(100);
+  const l3 = c3.render(100);
 
   assert.equal(l1.length, 2, `expected leading blank + 1 summary line, got ${JSON.stringify(l1)}`);
   assert.equal(l1[0], "");
-  assert.match(l1[1], /3 calls/);
-  assert.match(l1[1], /read×2/);
-  assert.match(l1[1], /bash×1/);
-  assert.equal(l2.length, 0, "second tool must collapse to 0 lines");
-  assert.equal(l3.length, 0, "third tool must collapse to 0 lines");
-  assert.ok(visibleWidth(l1[1]) <= 80);
+  assert.match(l1[1], /^ ▎✓ 3 calls · read a\.ts, b\.ts · bash npm test/);
+  assert.equal(l2.length, 0, "second tool must fold to 0 lines");
+  assert.equal(l3.length, 0, "third tool must fold to 0 lines");
+  assert.ok(visibleWidth(l1[1]) <= 100);
 
   // Ctrl+O expand -> every tool renders its full native Box
   h.setExpanded(true);
   for (const c of [c1, c2, c3]) c.setExpanded(true);
-  assert.match(c1.render(80).map(stripAnsi).join("\n"), /CALL a\.ts[\s\S]*RES ok1/);
-  assert.match(c2.render(80).map(stripAnsi).join("\n"), /CALL b\.ts[\s\S]*RES ok2/);
-  assert.match(c3.render(80).map(stripAnsi).join("\n"), /CALL npm test[\s\S]*RES ok3/);
+  assert.match(c1.render(100).map(stripAnsi).join("\n"), /CALL src\/a\.ts[\s\S]*RES ok1/);
+  assert.match(c2.render(100).map(stripAnsi).join("\n"), /CALL src\/b\.ts[\s\S]*RES ok2/);
+  assert.match(c3.render(100).map(stripAnsi).join("\n"), /CALL npm test[\s\S]*RES ok3/);
 
   // Ctrl+O collapse again -> returns to 1 summary line + 0 follower lines
   h.setExpanded(false);
   for (const c of [c1, c2, c3]) c.setExpanded(false);
-  assert.equal(c1.render(80).length, 2);
-  assert.equal(c2.render(80).length, 0);
-  assert.equal(c3.render(80).length, 0);
+  assert.equal(c1.render(100).length, 2);
+  assert.equal(c2.render(100).length, 0);
+  assert.equal(c3.render(100).length, 0);
 
   await h.emit("session_shutdown", {});
 });
 
-test("shows spinner while running and highlights errors on failure", async () => {
+test("shows spinner while running, marks aborted on agent_end without checkmark, and expands error line", async () => {
   const h = createHarness();
   await h.emit("session_start", {});
   await h.emit("message_end", {
@@ -161,18 +161,28 @@ test("shows spinner while running and highlights errors on failure", async () =>
   c2.updateResult({ content: [{ type: "text", text: "partial" }], durationMs: 0 }, true);
 
   const runningLine = stripAnsi(c1.render(100).join("\n"));
-  assert.match(runningLine, /bash false/);
+  assert.match(runningLine, /▎[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] bash false/);
   assert.match(runningLine, /1\/2/);
 
+  // Aborting mid-run must render ■ aborted, never ✓
+  await h.emit("agent_end", {});
+  const abortedLine = stripAnsi(c1.render(100).join("\n"));
+  assert.match(abortedLine, /▎■ 2 calls/);
+  assert.match(abortedLine, /aborted/);
+  assert.doesNotMatch(abortedLine, /✓/);
+
+  // Error result renders ✕ + second line with first error line and expand hint
   c2.updateResult({ content: [{ type: "text", text: "Command exited with code 1" }], isError: true, durationMs: 500 }, false);
-  const errLine = stripAnsi(c1.render(100).join("\n"));
-  assert.match(errLine, /✕/);
-  assert.match(errLine, /1 failed \(bash: Command exited with code 1\)/);
+  const errLines = c1.render(100).map(stripAnsi);
+  assert.equal(errLines.length, 3, "leading blank + header + error detail line");
+  assert.match(errLines[1], /▎✕ 2 calls · 1 failed/);
+  assert.match(errLines[2], /▎  bash: Command exited with code 1/);
+  assert.match(errLines[2], /展开/);
 
   await h.emit("session_shutdown", {});
 });
 
-test("collapses restored historical sessions and passes HTML export through untouched", async () => {
+test("folds restored historical sessions and passes HTML export through untouched", async () => {
   const branch = [
     {
       type: "message",
@@ -196,13 +206,13 @@ test("collapses restored historical sessions and passes HTML export through unto
     renderResult: () => new Text("SELF_RES", 0, 0),
   };
   const ui = { requestRender: () => {} };
-  // Replay does not call markExecutionStarted()
   const c1 = new ToolExecutionComponent("read", "h-1", { path: "a.ts" }, {}, h.wrap("read", undefined), ui, process.cwd());
   const c2 = new ToolExecutionComponent("edit", "h-2", { path: "b.ts" }, {}, h.wrap("edit", baseEdit), ui, process.cwd());
   c1.updateResult({ content: [{ type: "text", text: "ok" }], durationMs: 120 }, false);
   c2.updateResult({ content: [{ type: "text", text: "edited" }], durationMs: 250 }, false);
 
-  assert.match(stripAnsi(c1.render(90).join("\n")), /2 calls · read×1 · edit×1/);
+  const summary = stripAnsi(c1.render(90).join("\n"));
+  assert.match(summary, /▎✓ 2 calls · read a\.ts · edit b\.ts/);
   assert.equal(c2.render(90).length, 0);
 
   // Expanding self-shell edit preserves its self layout cleanly
