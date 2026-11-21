@@ -19,9 +19,10 @@ interface SourceGroup {
   transport: string;
   models: ChatModel[];
 }
-const RECENT_FILE = path.join(getAgentDir(), "recent-models.json");
 const MAX_RECENT = 5;
 const RECENT = "__recent__";
+const recentFile = () => path.join(getAgentDir(), "recent-models.json");
+const thinkingFile = () => path.join(getAgentDir(), "model-thinking-levels.json");
 const SOURCE_NAMES: Record<string, string> = {
   codex: "Codex",
   "openai-codex": "OpenAI Codex",
@@ -130,19 +131,52 @@ export function groupModels(models: ChatModel[]): SourceGroup[] {
 
 function loadRecentModels(): RecentModelEntry[] {
   try {
-    const data = JSON.parse(fs.readFileSync(RECENT_FILE, "utf8"));
+    const data = JSON.parse(fs.readFileSync(recentFile(), "utf8"));
     return Array.isArray(data) ? data.filter((entry) =>
       typeof entry?.provider === "string" && typeof entry?.modelId === "string").slice(0, MAX_RECENT) : [];
   } catch { return []; }
 }
 
+function loadThinkingMap(): Record<string, string> {
+  try {
+    const data = JSON.parse(fs.readFileSync(thinkingFile(), "utf8"));
+    if (!data || typeof data !== "object" || Array.isArray(data)) return {};
+    return Object.fromEntries(
+      Object.entries(data).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+    );
+  } catch {
+    return {};
+  }
+}
+
+export function loadModelThinkingLevel(model: Pick<ChatModel, "provider" | "id">): string | undefined {
+  const id = `${model.provider}/${model.id}`;
+  const fromMap = loadThinkingMap()[id];
+  if (fromMap) return fromMap;
+  return loadRecentModels().find((entry) => entry.provider === model.provider && entry.modelId === model.id)?.thinkingLevel;
+}
+
+export function saveModelThinkingLevel(model: Pick<ChatModel, "provider" | "id">, thinkingLevel?: string) {
+  if (!thinkingLevel) return;
+  try {
+    const file = thinkingFile();
+    const map = loadThinkingMap();
+    const id = `${model.provider}/${model.id}`;
+    if (map[id] === thinkingLevel) return;
+    map[id] = thinkingLevel;
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(map, null, 2), "utf8");
+  } catch { /* A read-only history file must not prevent switching models. */ }
+}
+
 function saveRecentModel(model: ChatModel, thinkingLevel?: string) {
   try {
+    const file = recentFile();
     const list = loadRecentModels().filter((entry) =>
       entry.provider !== model.provider || entry.modelId !== model.id);
     list.unshift({ provider: model.provider, modelId: model.id, thinkingLevel, lastUsed: Date.now() });
-    fs.mkdirSync(path.dirname(RECENT_FILE), { recursive: true });
-    fs.writeFileSync(RECENT_FILE, JSON.stringify(list.slice(0, MAX_RECENT), null, 2), "utf8");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(list.slice(0, MAX_RECENT), null, 2), "utf8");
   } catch { /* A read-only history file must not prevent switching models. */ }
 }
 
@@ -205,15 +239,31 @@ function matchesModel(model: ChatModel, query: string): boolean {
   return query.toLowerCase().trim().split(/\s+/).every((word) => text.includes(word));
 }
 
-async function applyModel(pi: ExtensionAPI, ctx: ExtensionContext, model: ChatModel, thinking?: string) {
+let applyingModelSelection = false;
+
+export async function applyModel(pi: ExtensionAPI, ctx: ExtensionContext, model: ChatModel, thinking?: string) {
   try {
-    if (!(await pi.setModel(model))) {
-      ctx.ui.notify(`模型不可用：${model.provider}/${model.id}，请检查凭据`, "error");
-      return;
+    if (ctx.model?.reasoning) {
+      saveModelThinkingLevel(ctx.model, pi.getThinkingLevel());
     }
-    if (thinking && model.reasoning) pi.setThinkingLevel(thinking as ReturnType<ExtensionAPI["getThinkingLevel"]>);
-    saveRecentModel(model, pi.getThinkingLevel());
-    ctx.ui.notify(`已切换至 ${displayModelName(model)} (${model.provider}/${model.id})`, "info");
+    const targetThinking = thinking ?? (model.reasoning ? loadModelThinkingLevel(model) : undefined);
+    applyingModelSelection = true;
+    try {
+      if (!(await pi.setModel(model))) {
+        ctx.ui.notify(`模型不可用：${model.provider}/${model.id}，请检查凭据`, "error");
+        return;
+      }
+      if (targetThinking && model.reasoning) {
+        pi.setThinkingLevel(targetThinking as ReturnType<ExtensionAPI["getThinkingLevel"]>);
+      }
+    } finally {
+      applyingModelSelection = false;
+    }
+    const effectiveThinking = pi.getThinkingLevel();
+    if (model.reasoning) saveModelThinkingLevel(model, effectiveThinking);
+    saveRecentModel(model, effectiveThinking);
+    const thinkingNote = model.reasoning && targetThinking ? ` · 思考 ${effectiveThinking}` : "";
+    ctx.ui.notify(`已切换至 ${displayModelName(model)} (${model.provider}/${model.id})${thinkingNote}`, "info");
   } catch (error) {
     ctx.ui.notify(`切换模型失败：${error instanceof Error ? error.message : String(error)}`, "error");
   }
@@ -342,8 +392,9 @@ async function openSmartModelPicker(pi: ExtensionAPI, ctx: ExtensionContext, mod
 
         const active = selectedModel();
         const root = view === "sources" ? groups.find((source) => source.key === list.getSelectedItem()?.value) : undefined;
+        const rememberedThinking = active?.reasoning ? loadModelThinkingLevel(active) : undefined;
         const detail = active
-          ? `${modelSource(active).name} · ${modelSource(active).transport} · ${formatContext(active.contextWindow) || "上下文未知"}${active.reasoning ? " · 支持推理" : ""}${isCurrent(active) ? " · 当前模型" : ""}`
+          ? `${modelSource(active).name} · ${modelSource(active).transport} · ${formatContext(active.contextWindow) || "上下文未知"}${active.reasoning ? " · 支持推理" : ""}${rememberedThinking ? ` · 记忆思考: ${rememberedThinking}` : ""}${isCurrent(active) ? " · 当前模型" : ""}`
           : root ? `${root.transport === "magpie" ? "通过 Magpie" : "直连通道"} · ${root.models.length} 个模型${root.models.some(isCurrent) ? " · 当前来源" : ""}` : "选择来源后查看模型";
         const id = active ? `ID: ${active.provider}/${active.id}` : "仅显示已配置凭据的可用模型 · ✓ 当前";
 
@@ -400,8 +451,19 @@ async function openSmartModelPicker(pi: ExtensionAPI, ctx: ExtensionContext, mod
 
 export default function smartModelsExtension(pi: ExtensionAPI) {
   let stopWatching: (() => void) | undefined;
+  pi.on("thinking_level_select", (event, ctx) => {
+    if (!applyingModelSelection && ctx.model?.reasoning) {
+      saveModelThinkingLevel(ctx.model, event.level);
+    }
+  });
   pi.on("model_select", (event) => {
-    if (event.model?.provider && event.model?.id) saveRecentModel(event.model, pi.getThinkingLevel());
+    if (!applyingModelSelection && event.model?.provider && event.model?.id) {
+      const level = pi.getThinkingLevel();
+      if (event.model.reasoning && !loadModelThinkingLevel(event.model)) {
+        saveModelThinkingLevel(event.model, level);
+      }
+      saveRecentModel(event.model, level);
+    }
   });
   pi.on("session_start", (_event, ctx) => {
     stopWatching?.();
