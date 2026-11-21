@@ -8,7 +8,7 @@
  *
  * The allowlist can only ever NARROW. Pi composes it with the child denylist as
  * `(!allowed || allowed.has(name)) && !excluded.has(name)`, so naming an
- * excluded tool here cannot resurrect it (see `../../shared/child-session.ts`).
+ * excluded tool here cannot resurrect it (see `../../../shared/child-session.ts`).
  *
  * Discovery is two-tier: `<agentDir>/agents/*.md` always, and `<cwd>/.pi/agents/
  * *.md` only in a trusted project — a project file supplies an
@@ -32,12 +32,12 @@ import {
   CHILD_EXCLUDED_TOOL_NAMES,
   CHILD_SAFE_PACKAGE_TOOL_NAMES,
   RETIRED_OPENPI_TOOL_NAMES,
-} from "../../../shared/child-session.ts";
+} from "../../../../shared/child-session.ts";
 import {
   isSubagentRoleName,
   type SubagentRoleModel,
-} from "../../../shared/subagent-roles.ts";
-import { sanitizeTerminalText } from "../../../shared/terminal-text.ts";
+} from "../../../../shared/subagent-roles.ts";
+import { sanitizeTerminalText } from "../../../../shared/terminal-text.ts";
 import { REASONING_EFFORTS, type ReasoningEffort } from "./domain.ts";
 
 /** Directory name scanned under both the agent dir and a project's `.pi`. */

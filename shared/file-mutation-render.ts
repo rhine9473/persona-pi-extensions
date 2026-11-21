@@ -5,8 +5,8 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import type { TSchema } from "typebox";
-import { renderPaddedToolActivityLine } from "../shared/tool-activity.ts";
-import type { MyPiSetupConfig } from "../shared/setup-config.ts";
+import { renderPaddedToolActivityLine } from "./tool-activity.ts";
+import type { MyPiSetupConfig } from "./setup-config.ts";
 
 export function activityEnabled(name: string, display: MyPiSetupConfig["ui"]) {
   return name === "bash"

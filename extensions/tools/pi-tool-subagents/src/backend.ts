@@ -9,7 +9,7 @@
 
 import type { Effect, Scope, Stream } from "effect";
 import { Context } from "effect";
-import type { AgentToolRenderer } from "../../../shared/agent-tool-renderer.ts";
+import type { AgentToolRenderer } from "../../../../shared/agent-tool-renderer.ts";
 import type {
   BackendName,
   SendError,

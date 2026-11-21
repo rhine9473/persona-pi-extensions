@@ -3,7 +3,7 @@
  *
  * Each subagent is an in-process `AgentSession` (a port of v1
  * subagents/manager.ts, reusing the shared child-session helpers in
- * extensions/shared/child-session.ts):
+ * shared/child-session.ts):
  * - real session files visible in /resume, child resources loaded per-cwd
  *   with trust gating, and the child tool denylist;
  * - `session.subscribe()` events translated to normalized SubagentEvents;
@@ -25,26 +25,26 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Cause, Scope } from "effect";
 import { Effect, Queue, Stream } from "effect";
-import { createAgentToolRenderLedger } from "../../../../shared/agent-tool-renderer.ts";
+import { createAgentToolRenderLedger } from "../../../../../shared/agent-tool-renderer.ts";
 import {
   bindChildSessionExtensions,
   CHILD_SHUTDOWN_TIMEOUT_MS,
   childToolPolicy,
   createChildResources,
   shutdownAndDisposeChildSession,
-} from "../../../../shared/child-session.ts";
+} from "../../../../../shared/child-session.ts";
 import {
   childToolsWithStructuredOutput,
   createStructuredOutputTool,
   type EncodedStructuredResult,
   encodeStructuredResult,
   STRUCTURED_OUTPUT_SYSTEM_INSTRUCTION,
-} from "../../../../shared/structured-output.ts";
-import { createToolCallTimeoutGuard } from "../../../../shared/tool-call-timeout.ts";
+} from "../../../../../shared/structured-output.ts";
+import { createToolCallTimeoutGuard } from "../../../../../shared/tool-call-timeout.ts";
 import {
   formatWorktreeCleanupWarning,
   reclaimWorktree,
-} from "../../../../shared/worktree.ts";
+} from "../../../../../shared/worktree.ts";
 import { resolveAgentModel } from "../agent-types.ts";
 import type {
   SubagentBackend,

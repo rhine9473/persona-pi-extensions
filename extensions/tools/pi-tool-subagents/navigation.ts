@@ -4,18 +4,18 @@ import {
   fitNavigationSides,
   renderNavigationMetrics,
   type BelowEditorStripState,
-} from "../../shared/below-editor-navigation.ts";
+} from "../../../shared/below-editor-navigation.ts";
 import {
   unreadActivityCounts,
   type ActivityCounts,
-} from "../../shared/activity-status.ts";
-import { spinnerFrame } from "../../shared/spinner.ts";
-import { sanitizeTerminalText } from "../../shared/terminal-text.ts";
+} from "../../../shared/activity-status.ts";
+import { spinnerFrame } from "../../../shared/spinner.ts";
+import { sanitizeTerminalText } from "../../../shared/terminal-text.ts";
 import { formatElapsed, type SubagentSnapshot } from "./src/domain.ts";
 import {
   contextPercent,
   formatSubagentSpend,
-} from "../../shared/context-utilization.ts";
+} from "../../../shared/context-utilization.ts";
 
 export interface SubagentStripEntry {
   snapshot: SubagentSnapshot;

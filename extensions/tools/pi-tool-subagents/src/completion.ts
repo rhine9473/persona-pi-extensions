@@ -1,5 +1,5 @@
 import { directEvidenceRef } from "./evidence.ts";
-import { projectDelegationCompletion } from "../../../shared/delegation-completion.ts";
+import { projectDelegationCompletion } from "../../../../shared/delegation-completion.ts";
 import type { SubagentSnapshot } from "./domain.ts";
 
 export function subagentCompletion(snap: SubagentSnapshot) {

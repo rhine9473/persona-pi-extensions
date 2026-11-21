@@ -1,9 +1,9 @@
-import type { AgentToolRenderer } from "../../../../shared/agent-tool-renderer.ts";
+import type { AgentToolRenderer } from "../../../../../shared/agent-tool-renderer.ts";
 import {
   buildPairingIndex,
   type AgentTranscriptDocument,
   type PairingIndex,
-} from "../../../../shared/agent-transcript.ts";
+} from "../../../../../shared/agent-transcript.ts";
 import type { SubagentSnapshot } from "../domain.ts";
 
 /** Cached items + pairing, keyed on snapshot identity and transcriptVersion. */

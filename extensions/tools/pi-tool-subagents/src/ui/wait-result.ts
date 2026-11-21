@@ -8,8 +8,8 @@ import {
   Markdown,
   truncateToWidth,
 } from "@earendil-works/pi-tui";
-import { sanitizeText } from "../../../../shared/agent-transcript.ts";
-import { formatSubagentSpend } from "../../../../shared/context-utilization.ts";
+import { sanitizeText } from "../../../../../shared/agent-transcript.ts";
+import { formatSubagentSpend } from "../../../../../shared/context-utilization.ts";
 import type { SubagentSpend } from "../domain.ts";
 
 const MAX_STATUS_ROWS = 4;

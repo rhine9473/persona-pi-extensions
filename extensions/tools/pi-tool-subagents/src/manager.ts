@@ -25,12 +25,12 @@ import {
   Stream,
 } from "effect";
 import type { SubagentBackend, SubagentSession } from "./backend.ts";
-import type { AgentToolRenderer } from "../../../shared/agent-tool-renderer.ts";
+import type { AgentToolRenderer } from "../../../../shared/agent-tool-renderer.ts";
 import type {
   ChildExecutionAdmission,
   ChildExecutionLease,
   ChildExecutionAdmissionSnapshot,
-} from "../../../shared/child-execution-admission.ts";
+} from "../../../../shared/child-execution-admission.ts";
 import { BackendRegistry } from "./backend.ts";
 import type {
   BackendName,

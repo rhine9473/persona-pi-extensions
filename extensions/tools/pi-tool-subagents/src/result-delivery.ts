@@ -1,8 +1,8 @@
-import type { ConsumableResultDeliveryQueue } from "../../../shared/result-delivery.ts";
+import type { ConsumableResultDeliveryQueue } from "../../../../shared/result-delivery.ts";
 import {
   type CompletionOwner,
   createCompletionInbox,
-} from "../../../shared/completion-inbox.ts";
+} from "../../../../shared/completion-inbox.ts";
 
 export interface SubagentResultDeliveryOptions<T> {
   /** True only when the parent has no run or queued continuation in flight. */

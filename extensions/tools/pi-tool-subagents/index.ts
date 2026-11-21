@@ -49,64 +49,64 @@ import {
   formatActivityStatus,
   hasActivity,
   unreadActivityCounts,
-} from "../../shared/activity-status.ts";
-import { sanitizeText } from "../../shared/agent-transcript.ts";
+} from "../../../shared/activity-status.ts";
+import { sanitizeText } from "../../../shared/agent-transcript.ts";
 import {
   delegationCompletionText,
   type DelegationCompletion,
-} from "../../shared/delegation-completion.ts";
+} from "../../../shared/delegation-completion.ts";
 import { subagentCompletion } from "./src/completion.ts";
 import { queryDirectEvidence } from "./src/evidence.ts";
 import {
   sessionChildExecutionAdmission,
   type ChildExecutionAdmission,
-} from "../../shared/child-execution-admission.ts";
+} from "../../../shared/child-execution-admission.ts";
 import {
   BelowEditorNavigationEditor,
   BelowEditorStripState,
-} from "../../shared/below-editor-navigation.ts";
+} from "../../../shared/below-editor-navigation.ts";
 import {
   effectiveChildToolAllowlist,
   inheritedChildToolAllowlist,
   resolveStandaloneChildProjectTrust,
-} from "../../shared/child-session.ts";
-import { onSetupApply } from "../../shared/setup-apply.ts";
-import { completionOwnerFor } from "../../shared/completion-inbox.ts";
+} from "../../../shared/child-session.ts";
+import { onSetupApply } from "../../../shared/setup-apply.ts";
+import { completionOwnerFor } from "../../../shared/completion-inbox.ts";
 import {
   formatContextUtilization,
   formatSubagentSpend,
-} from "../../shared/context-utilization.ts";
+} from "../../../shared/context-utilization.ts";
 import {
   registerEditorLayer,
   removeEditorLayer,
-} from "../../shared/editor-layers.ts";
+} from "../../../shared/editor-layers.ts";
 import {
   PLAN_MODE_CHANNEL,
   type PlanModeState,
   planModeAllowsDeclaredTools,
   planModeChildTools,
-} from "../../shared/plan-mode-state.ts";
+} from "../../../shared/plan-mode-state.ts";
 import {
   allocateResultBudgets,
   type ParentContextUsage,
-} from "../../shared/result-budget.ts";
-import { type DetailDisplay, loadSetupConfig } from "../../shared/setup-config.ts";
+} from "../../../shared/result-budget.ts";
+import { type DetailDisplay, loadSetupConfig } from "../../../shared/setup-config.ts";
 import {
   OPENPI_TOOL_SURFACE,
   patchOwnedTools,
-} from "../../shared/tool-surface.ts";
+} from "../../../shared/tool-surface.ts";
 import {
   projectSubagentCapability,
   projectSubagentDetail,
   registerWebCapability,
   registerWebCapabilityActions,
-} from "../../shared/web-observer-registry.ts";
+} from "../../../shared/web-observer-registry.ts";
 import {
   createWorktree,
   formatWorktreeCleanupWarning,
   reclaimWorktree,
   type Worktree,
-} from "../../shared/worktree.ts";
+} from "../../../shared/worktree.ts";
 import {
   normalizeSubagentTitle,
   SubagentStripWidget,

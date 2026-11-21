@@ -142,7 +142,7 @@ Two consequences worth being precise about:
 
 - **It can only narrow.** Listing a denied tool (`subagent_spawn`, `workflow`,
   `ask_user`, …) does not grant it. The child boundary in
-  `extensions/shared/child-session.ts` stays authoritative, and the drift guard
+  `shared/child-session.ts` stays authoritative, and the drift guard
   that protects it is unaffected.
 - **It also unlocks.** Pi's default active set is only
   `read, bash, edit, write`, so `grep`, `find`, and `ls` are otherwise
@@ -174,7 +174,7 @@ and are not treated as missing, so the child denylist stays authoritative.
 
 - `extensions/subagents/src/agent-types.ts` — built-ins, parsing, discovery, diagnostics, and model
   precedence helpers.
-- `extensions/shared/subagent-roles.ts` — one typed source for built-in role names.
+- `shared/subagent-roles.ts` — one typed source for built-in role names.
 - `extensions/subagents/index.ts` — safe initial discovery, session-scoped roster refresh and
   re-registration, the `agent_type` parameter, and merging a type/config
   assignment into the spawn task.
@@ -182,7 +182,7 @@ and are not treated as missing, so the child denylist stays authoritative.
   a direct subagent session.
 - `extensions/workflows/index.ts` and `extensions/workflows/runner.ts` — resolve the same
   type for each Workflow call and enforce its prompt, model, effort, and tools.
-- `extensions/shared/child-session.ts` — `childToolPolicy(tools?)`, where the allowlist
+- `shared/child-session.ts` — `childToolPolicy(tools?)`, where the allowlist
   and denylist compose.
 
 Covered by `tests/extensions/subagents/agent-types.test.ts`, including the trust gate and the

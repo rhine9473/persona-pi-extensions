@@ -1,8 +1,8 @@
 /** All model-facing strings for the subagents tools. */
 
 import { Type } from "typebox";
-import { effectiveChildToolAllowlist } from "../../../shared/child-session.ts";
-import { SUBAGENT_ROLE_NAMES } from "../../../shared/subagent-roles.ts";
+import { effectiveChildToolAllowlist } from "../../../../shared/child-session.ts";
+import { SUBAGENT_ROLE_NAMES } from "../../../../shared/subagent-roles.ts";
 import { type AgentType, READ_ONLY_AGENT_TOOLS } from "./agent-types.ts";
 import { BACKEND_NAMES, REASONING_EFFORTS } from "./domain.ts";
 import { MAX_RUNNING } from "./manager.ts";

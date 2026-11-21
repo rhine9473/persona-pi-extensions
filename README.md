@@ -29,7 +29,7 @@ Rhine 的个人专属 Pi Agent 扩展套件，按大类与统一前缀整理。
 
 ### 3. 通道 / Provider 类 (`extensions/providers/pi-provider-*`)
 
-1. **`pi-provider-antigravity`** (`/agy`, `/antigravity.*`)
+1. **`pi-provider-antigravity`** (`/agy`)
    - 精简版 Antigravity OAuth Provider（基于 `Rahularya01/pi-antigravity`，MIT 协议）。
    - 支持本地 HTTP 代理 OAuth 登录与刷新、重复 `-tiered` 模型去重、类 Magpie 多账号冷却感知与热切换，以及圆角控制台 `/agy`。
 

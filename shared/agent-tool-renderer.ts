@@ -10,7 +10,7 @@ import type { TUI } from "@earendil-works/pi-tui";
 import {
   activityEnabled,
   activityRenderers,
-} from "../file-mutation-display/render.ts";
+} from "./file-mutation-render.ts";
 import { loadSetupConfig } from "./setup-config.ts";
 
 export interface AgentToolRenderRequest {

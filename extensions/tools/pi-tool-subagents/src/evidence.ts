@@ -3,7 +3,7 @@ import type {
   ExtensionToolContext,
   SessionEntry,
 } from "@earendil-works/pi-coding-agent";
-import type { DelegationCompletion } from "../../../shared/delegation-completion.ts";
+import type { DelegationCompletion } from "../../../../shared/delegation-completion.ts";
 import type { DirectEvidenceBinding } from "./domain.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
