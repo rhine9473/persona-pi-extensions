@@ -1,8 +1,8 @@
 /** Alt+M / /models / /m: model picker grouped by actual upstream source. */
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { DynamicBorder, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { Input, Key, matchesKey, SelectList, truncateToWidth, type SelectItem } from "@earendil-works/pi-tui";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { Input, Key, matchesKey, SelectList, truncateToWidth, visibleWidth, type SelectItem } from "@earendil-works/pi-tui";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -23,12 +23,31 @@ const RECENT_FILE = path.join(getAgentDir(), "recent-models.json");
 const MAX_RECENT = 5;
 const RECENT = "__recent__";
 const SOURCE_NAMES: Record<string, string> = {
-  codex: "Codex", claude: "Claude", qoder: "Qoder", "qoder-cn": "Qoder CN",
-  cline: "Cline", workbuddy: "WorkBuddy", "workbuddy-ai": "WorkBuddy AI",
-  zcode: "ZCode", autoclaw: "AutoClaw", "autoclaw-cn": "AutoClaw 国内",
-  antigravity: "Antigravity", "gemini-cli": "Gemini CLI", copilot: "Copilot",
-  "opencode-zen-free": "OpenCode Zen Free", "trae-cn": "Trae CN",
-  "trae-global": "Trae Global", group: "自动路由",
+  codex: "Codex",
+  "openai-codex": "OpenAI Codex",
+  claude: "Claude",
+  anthropic: "Anthropic",
+  deepseek: "DeepSeek",
+  qoder: "Qoder",
+  "qoder-cn": "Qoder CN",
+  cline: "Cline",
+  workbuddy: "WorkBuddy",
+  "workbuddy-ai": "WorkBuddy AI",
+  zcode: "ZCode",
+  autoclaw: "AutoClaw",
+  "autoclaw-cn": "AutoClaw 国内",
+  antigravity: "Antigravity",
+  "google-antigravity": "Google Antigravity",
+  "google-vertex": "Google Vertex AI",
+  "gemini-cli": "Gemini CLI",
+  copilot: "Copilot",
+  opencode: "OpenCode",
+  "opencode-go": "OpenCode Go",
+  "opencode-zen-free": "OpenCode Zen Free",
+  "trae-cn": "Trae CN",
+  "trae-global": "Trae Global",
+  xiaomi: "Xiaomi",
+  group: "自动路由",
 };
 
 export const modelKey = (model: Pick<ChatModel, "provider" | "id">) =>
@@ -36,7 +55,8 @@ export const modelKey = (model: Pick<ChatModel, "provider" | "id">) =>
 
 export function modelSource(model: ChatModel) {
   if (model.provider !== "magpie") {
-    return { key: JSON.stringify([model.provider]), name: model.provider, transport: "直连" };
+    const name = SOURCE_NAMES[model.provider] || model.provider;
+    return { key: JSON.stringify([model.provider]), name, transport: "直连" };
   }
   const slash = model.id.indexOf("/");
   const upstream = slash > 0 ? model.id.slice(0, slash) : "other";
@@ -47,9 +67,13 @@ export function modelSource(model: ChatModel) {
 }
 
 export function displayModelName(model: ChatModel): string {
-  const name = model.name || model.id;
-  const suffix = model.provider === "magpie" ? name.lastIndexOf(" · ") : -1;
-  return suffix > 0 ? name.slice(0, suffix) : name;
+  const raw = model.name || model.id;
+  const sep = model.provider === "magpie" ? raw.lastIndexOf(" · ") : -1;
+  const base = sep > 0 ? raw.slice(0, sep) : raw;
+  const sourceName = modelSource(model).name;
+  // Strip redundant trailing source qualifier such as " (Antigravity)" inside a grouped picker.
+  const escaped = sourceName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return base.replace(new RegExp(`\\s*\\(${escaped}\\)$`, "i"), "").trim();
 }
 
 export function formatContext(tokens?: number): string {
@@ -65,6 +89,18 @@ function priceRank(name: string): number {
   return factor ? Number(factor[1]) : /free/i.test(badge) ? 0 : Infinity;
 }
 
+function familyAndVersionRank(model: ChatModel): [number, number] {
+  const id = model.id.toLowerCase().replace(/^[^/]+\//, "");
+  const verMatch = id.match(/(\d+)(?:\.(\d+))?/);
+  const ver = verMatch ? Number(verMatch[1]) * 100 + Number(verMatch[2] ?? 0) : 0;
+  if (id.startsWith("gemini-")) return [0, -ver];
+  if (id.startsWith("claude-opus")) return [1, -ver];
+  if (id.startsWith("claude-sonnet")) return [2, -ver];
+  if (id.startsWith("claude-")) return [3, -ver];
+  if (id.startsWith("gpt-")) return [4, -ver];
+  return [5, -ver];
+}
+
 export function groupModels(models: ChatModel[]): SourceGroup[] {
   const groups = new Map<string, SourceGroup>();
   for (const model of models) {
@@ -74,10 +110,17 @@ export function groupModels(models: ChatModel[]): SourceGroup[] {
   }
   for (const group of groups.values()) {
     group.models.sort((a, b) => {
-      const aRank = priceRank(displayModelName(a)), bRank = priceRank(displayModelName(b));
-      // Infinity - Infinity is NaN, not a valid alphabetical tie-breaker.
+      const aRank = priceRank(displayModelName(a));
+      const bRank = priceRank(displayModelName(b));
       if (aRank !== bRank) return aRank < bRank ? -1 : 1;
-      return displayModelName(a).localeCompare(displayModelName(b), "zh-CN", { numeric: true }) || a.id.localeCompare(b.id);
+      const [famA, verA] = familyAndVersionRank(a);
+      const [famB, verB] = familyAndVersionRank(b);
+      if (famA !== famB) return famA - famB;
+      if (verA !== verB) return verA - verB;
+      return (
+        displayModelName(a).localeCompare(displayModelName(b), "zh-CN", { numeric: true }) ||
+        a.id.localeCompare(b.id)
+      );
     });
   }
   return [...groups.values()].sort((a, b) =>
@@ -105,15 +148,12 @@ function saveRecentModel(model: ChatModel, thinkingLevel?: string) {
 
 async function getPickerModels(ctx: ExtensionContext): Promise<ChatModel[] | null> {
   try {
-    // Reload magpie's Pi catalog, not the unrestricted /v1/models catalog:
-    // the user's per-agent visibility selections must remain authoritative.
     await ctx.modelRegistry.refresh({ allowNetwork: false });
     const error = ctx.modelRegistry.getError();
     if (error) {
       ctx.ui.notify(`模型配置加载失败：${error}`, "error");
       return null;
     }
-    // Includes credentials from models.json, environment and provider extensions.
     return ctx.modelRegistry.getAvailable();
   } catch {
     ctx.ui.notify("刷新模型列表失败，请检查模型配置后重试", "error");
@@ -121,11 +161,6 @@ async function getPickerModels(ctx: ExtensionContext): Promise<ChatModel[] | nul
   }
 }
 
-/**
- * Reloads Pi's model catalog whenever magpie rewrites models.json, so a
- * provider added or removed in magpie appears without /reload or reopening
- * Pi. Silent by design: no notification, no model switch, no network.
- */
 function watchModelsFile(ctx: ExtensionContext): () => void {
   const file = path.join(getAgentDir(), "models.json");
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -144,13 +179,10 @@ function watchModelsFile(ctx: ExtensionContext): () => void {
     const now = stamp();
     if (now === last) return;
     last = now;
-    // Atomic writes (magpie's) rename over the file, so a stat can land
-    // mid-write; a failed reload is retried by the next change.
     void ctx.modelRegistry.refresh({ allowNetwork: false }).catch(() => {});
   };
   let watcher: fs.FSWatcher | undefined;
   try {
-    // Watch the directory: an atomic rename replaces the file's inode.
     watcher = fs.watch(path.dirname(file), (_event, name) => {
       if (name && String(name) !== "models.json") return;
       if (timer) clearTimeout(timer);
@@ -160,7 +192,6 @@ function watchModelsFile(ctx: ExtensionContext): () => void {
   } catch {
     watcher = undefined;
   }
-  // A polling fallback covers filesystems where fs.watch reports nothing.
   const poll = setInterval(sync, 5000);
   return () => {
     if (timer) clearTimeout(timer);
@@ -170,7 +201,7 @@ function watchModelsFile(ctx: ExtensionContext): () => void {
 }
 
 function matchesModel(model: ChatModel, query: string): boolean {
-  const text = `${model.provider}/${model.id} ${model.name} ${modelSource(model).name}`.toLowerCase();
+  const text = `${model.provider}/${model.id} ${displayModelName(model)} ${model.name} ${modelSource(model).name}`.toLowerCase();
   return query.toLowerCase().trim().split(/\s+/).every((word) => text.includes(word));
 }
 
@@ -182,10 +213,16 @@ async function applyModel(pi: ExtensionAPI, ctx: ExtensionContext, model: ChatMo
     }
     if (thinking && model.reasoning) pi.setThinkingLevel(thinking as ReturnType<ExtensionAPI["getThinkingLevel"]>);
     saveRecentModel(model, pi.getThinkingLevel());
-    ctx.ui.notify(`已切换至 ${model.provider}/${model.id}`, "info");
+    ctx.ui.notify(`已切换至 ${displayModelName(model)} (${model.provider}/${model.id})`, "info");
   } catch (error) {
     ctx.ui.notify(`切换模型失败：${error instanceof Error ? error.message : String(error)}`, "error");
   }
+}
+
+function padRight(text: string, targetWidth: number): string {
+  const clipped = truncateToWidth(text, targetWidth, "…");
+  const w = visibleWidth(clipped);
+  return w >= targetWidth ? clipped : `${clipped}${" ".repeat(targetWidth - w)}`;
 }
 
 async function openSmartModelPicker(pi: ExtensionAPI, ctx: ExtensionContext, models: ChatModel[]) {
@@ -204,8 +241,8 @@ async function openSmartModelPicker(pi: ExtensionAPI, ctx: ExtensionContext, mod
     let list: SelectList;
     let visibleItems: SelectItem[] = [];
     let focused = false;
-    const search = new Input({ prompt: "搜索: ", placeholder: "来源 / 模型名称 / ID" });
-    const maxVisible = Math.max(3, Math.min(10, (tui.terminal?.rows || 24) - 12));
+    const search = new Input({ prompt: " 搜索: ", placeholder: "来源 / 模型名称 / ID" });
+    const maxVisible = Math.max(4, Math.min(12, (tui.terminal?.rows || 24) - 12));
     const layout = {
       minPrimaryColumnWidth: 18,
       maxPrimaryColumnWidth: 50,
@@ -213,7 +250,7 @@ async function openSmartModelPicker(pi: ExtensionAPI, ctx: ExtensionContext, mod
     };
     const listTheme = {
       selectedPrefix: (s: string) => theme.fg("accent", s),
-      selectedText: (s: string) => theme.fg("accent", s),
+      selectedText: (s: string) => theme.bold(theme.fg("accent", s)),
       description: (s: string) => theme.fg("muted", s),
       scrollInfo: (s: string) => theme.fg("dim", s),
       noMatch: () => theme.fg("warning", "  没有匹配项"),
@@ -222,7 +259,7 @@ async function openSmartModelPicker(pi: ExtensionAPI, ctx: ExtensionContext, mod
     const isCurrent = (model: ChatModel) => modelKey(model) === current;
     const rowForModel = (model: ChatModel): SelectItem => ({
       value: modelKey(model),
-      label: `${isCurrent(model) ? "* " : ""}${displayModelName(model)}`,
+      label: `${isCurrent(model) ? "✓ " : "  "}${displayModelName(model)}`,
       description: view === "recent"
         ? `${modelSource(model).name} · ${modelSource(model).transport}`
         : [formatContext(model.contextWindow), model.reasoning ? "推理" : ""].filter(Boolean).join(" · "),
@@ -233,14 +270,14 @@ async function openSmartModelPicker(pi: ExtensionAPI, ctx: ExtensionContext, mod
       let items: SelectItem[];
       if (view === "sources") {
         const matchingRecent = recent.filter((model) => matchesModel(model, query));
-        items = matchingRecent.length ? [{ value: RECENT, label: "最近使用", description: `${matchingRecent.length} 个模型` }] : [];
+        items = matchingRecent.length ? [{ value: RECENT, label: "  最近使用", description: `${matchingRecent.length} 个模型` }] : [];
         for (const source of groups) {
           const matching = source.models.filter((model) => matchesModel(model, query));
           if (!matching.length) continue;
           const active = source.models.some(isCurrent);
           items.push({
             value: source.key,
-            label: `${active ? "* " : ""}${source.name}`,
+            label: `${active ? "✓ " : "  "}${source.name}`,
             description: `${source.transport} · ${matching.length} 个模型`,
           });
         }
@@ -265,7 +302,6 @@ async function openSmartModelPicker(pi: ExtensionAPI, ctx: ExtensionContext, mod
           group = groups.find((source) => source.key === item.value);
           view = "models";
         }
-        // Keep a global model search when entering one matching source.
         search.setValue(sourceQuery);
         rebuild(current);
       };
@@ -288,37 +324,56 @@ async function openSmartModelPicker(pi: ExtensionAPI, ctx: ExtensionContext, mod
       get focused() { return focused; },
       set focused(value: boolean) { focused = value; search.focused = value; },
       render(width: number) {
-        const narrow = width < 60;
-        // Give names the remaining width; metadata gets a small, bounded column.
-        // Mutating the shared layout preserves selection and scroll on resize.
-        layout.minPrimaryColumnWidth = Math.max(1, Math.min(18, width - 4));
-        layout.maxPrimaryColumnWidth = Math.max(layout.minPrimaryColumnWidth, Math.min(76, width - 24));
-        const border = new DynamicBorder((s) => theme.fg("accent", s)).render(width);
+        const boxWidth = Math.min(96, Math.max(36, width));
+        const innerWidth = Math.max(34, boxWidth - 2);
+        const leftPad = width > boxWidth ? " ".repeat(Math.floor((width - boxWidth) / 2)) : "";
+        const narrow = innerWidth < 56;
+        layout.minPrimaryColumnWidth = Math.max(1, Math.min(18, innerWidth - 4));
+        layout.maxPrimaryColumnWidth = Math.max(layout.minPrimaryColumnWidth, Math.min(60, innerWidth - 24));
+
         const title = view === "sources" ? "选择模型来源"
           : view === "recent" ? "最近使用"
-          : `${group?.name} / ${group?.transport}`;
+          : `${group?.name} · ${group?.transport}`;
+        const rightCount = view === "sources"
+          ? `${groups.length} 个来源`
+          : view === "recent"
+            ? `${recent.length} 个模型`
+            : `${group?.models.length ?? 0} 个模型`;
+
         const active = selectedModel();
         const root = view === "sources" ? groups.find((source) => source.key === list.getSelectedItem()?.value) : undefined;
         const detail = active
           ? `${modelSource(active).name} · ${modelSource(active).transport} · ${formatContext(active.contextWindow) || "上下文未知"}${active.reasoning ? " · 支持推理" : ""}${isCurrent(active) ? " · 当前模型" : ""}`
-          : root ? `${root.transport === "magpie" ? "通过 magpie" : "直接连接"} · ${root.models.length} 个模型${root.models.some(isCurrent) ? " · 当前来源" : ""}` : "选择来源后查看模型";
-        const id = active ? `ID: ${active.provider}/${active.id}` : "只显示已配置凭据的模型 · * 当前";
-        const lines = [
-          ...border,
-          ` ${theme.bold(theme.fg("accent", title))}`,
-          "",
-          ...search.render(width),
-          "",
-          ...list.render(width),
-          "",
+          : root ? `${root.transport === "magpie" ? "通过 Magpie" : "直连通道"} · ${root.models.length} 个模型${root.models.some(isCurrent) ? " · 当前来源" : ""}` : "选择来源后查看模型";
+        const id = active ? `ID: ${active.provider}/${active.id}` : "仅显示已配置凭据的可用模型 · ✓ 当前";
+
+        const hints = narrow
+          ? "↑↓ 选择  Enter 确认  Esc 返回"
+          : `↑↓ 选择  Enter ${view === "sources" ? "展开" : "切换"}  Esc 清空/返回${view !== "sources" ? "  ← 返回" : ""}`;
+
+        const innerLines = [
+          ...search.render(innerWidth),
+          theme.fg("borderMuted", "─".repeat(innerWidth)),
+          ...list.render(innerWidth),
+          theme.fg("borderMuted", "─".repeat(innerWidth)),
           theme.fg("muted", ` ${detail}`),
           theme.fg("dim", ` ${id}`),
-          "",
-          theme.fg("dim", narrow ? " ↑↓ 选择  Enter 确认  Esc 返回" :
-            ` ↑↓ 选择  Enter ${view === "sources" ? "展开" : "切换"}  Esc 清空/返回  ← 返回  * 当前`),
-          ...border,
+          theme.fg("dim", ` ${hints}`),
         ];
-        return lines.map((line) => truncateToWidth(line, Math.max(1, width), "…"));
+
+        const titlePart = ` ${title} `;
+        const metaPart = ` ${rightCount} `;
+        const fill = Math.max(1, innerWidth - visibleWidth(titlePart) - visibleWidth(metaPart) - 2);
+        const top =
+          theme.fg("border", "╭─") +
+          theme.bold(theme.fg("accent", titlePart)) +
+          theme.fg("border", "─".repeat(fill)) +
+          theme.fg("muted", metaPart) +
+          theme.fg("border", "─╮");
+        const side = theme.fg("border", "│");
+        const bottom = theme.fg("border", `╰${"─".repeat(innerWidth)}╯`);
+        const framed = [top, ...innerLines.map((l) => `${side}${padRight(l, innerWidth)}${side}`), bottom];
+        return framed.map((line) => truncateToWidth(`${leftPad}${line}`, Math.max(1, width), ""));
       },
       invalidate() { search.invalidate(); list.invalidate(); },
       handleInput(data: string) {
@@ -348,7 +403,6 @@ export default function smartModelsExtension(pi: ExtensionAPI) {
   pi.on("model_select", (event) => {
     if (event.model?.provider && event.model?.id) saveRecentModel(event.model, pi.getThinkingLevel());
   });
-  // Long-lived resources belong to the session, not the factory.
   pi.on("session_start", (_event, ctx) => {
     stopWatching?.();
     stopWatching = watchModelsFile(ctx);
@@ -369,13 +423,12 @@ export default function smartModelsExtension(pi: ExtensionAPI) {
     if (!models) return;
     const query = args?.trim();
     if (!query) { await openSmartModelPicker(pi, ctx, models); return; }
-    // Only a valid trailing thinking level is a suffix; :free is part of an ID.
     const thinking = /:(off|minimal|low|medium|high|xhigh|max)$/.exec(query);
     const pattern = thinking ? query.slice(0, thinking.index) : query;
     const lower = pattern.toLowerCase();
     const exact = models.filter((model) => `${model.provider}/${model.id}`.toLowerCase() === lower);
     const byId = models.filter((model) => model.id.toLowerCase() === lower);
-    const byName = models.filter((model) => displayModelName(model).toLowerCase() === lower);
+    const byName = models.filter((model) => displayModelName(model).toLowerCase() === lower || model.name.toLowerCase() === lower);
     const candidates = exact.length ? exact : byId.length ? byId : byName.length ? byName : models.filter((model) => matchesModel(model, pattern));
     if (candidates.length === 1) await applyModel(pi, ctx, candidates[0], thinking?.[1]);
     else if (!candidates.length) ctx.ui.notify(`未找到可用模型：${pattern}`, "warning");
