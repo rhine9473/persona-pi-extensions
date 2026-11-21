@@ -24,6 +24,33 @@ try {
   assert.equal(second.stopReason, "stop", second.errorMessage);
   assert.notEqual(bodies[1].request.sessionId, bodies[2].request.sessionId);
 
+  // Next turn after a recovery stays sticky on the recovered sessionId instead of
+  // snapping back to the stalled/cache-wiped original sessionId.
+  const nextTurn = await streamAntigravity(
+    model,
+    { messages: [{ role: "user", content: "next", timestamp: 1 }, second] },
+    options,
+  ).result();
+  assert.equal(nextTurn.stopReason, "stop", nextTurn.errorMessage);
+  assert.equal(bodies[3].request.sessionId, bodies[2].request.sessionId);
+
+  // Mid-stream termination (missing finishReason) rotates sessionId on subsequent retry.
+  const streamOpts = { ...options, sessionId: "mid-stream-recovery-test" };
+  const streamBodies: any[] = [];
+  let streamCalls = 0;
+  globalThis.fetch = (async (_url, init) => {
+    streamBodies.push(JSON.parse(String(init?.body)));
+    if (++streamCalls === 1) {
+      return new Response('data: {"response":{"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}}\n\n');
+    }
+    return new Response('data: {"response":{"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}]}}\n\ndata: [DONE]\n\n');
+  }) as typeof fetch;
+  const abortedMid = await streamAntigravity(model, { messages: [] }, streamOpts).result();
+  assert.equal(abortedMid.stopReason, "error");
+  const retriedMid = await streamAntigravity(model, { messages: [] }, streamOpts).result();
+  assert.equal(retriedMid.stopReason, "stop", retriedMid.errorMessage);
+  assert.notEqual(streamBodies[0].request.sessionId, streamBodies[1].request.sessionId);
+
   globalThis.fetch = (async () => { throw new Error("transport timed out"); }) as typeof fetch;
   const failed = await streamAntigravity(model, { messages: [] }, options).result();
   assert.match(failed.errorMessage ?? "", /timed out/);

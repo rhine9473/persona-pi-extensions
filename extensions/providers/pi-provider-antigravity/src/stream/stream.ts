@@ -1890,11 +1890,50 @@ export async function streamResponse(
 }
 
 /**
- * Per-turn POST counter keyed on (pi session, requestIndex): nonce 0 is the
- * first-ever request for that turn, anything above is a retry — pi's
- * auto-retry, a manual /retry, or our own empty-response loop.
+ * Per-turn / per-session recovery nonce state. A request keeps its deterministic
+ * `sessionId` across explicit HTTP rejections (429/503/404) so prompt caching
+ * survives capacity retries and endpoint fallbacks, and only rotates to a fresh
+ * `retrySessionSeed` after a transport/timeout/mid-stream/empty failure that
+ * may leave a stuck server-side generation queued behind the same session.
  */
+const MAX_RECOVERY_ENTRIES = 64;
 const turnRequestNonces = new Map<string, number>();
+const sessionRecoveryNonces = new Map<string, number>();
+const recoveredTurnKeys = new Set<string>();
+
+function evictOldest(collection: { size: number; keys(): IterableIterator<string>; delete(k: string): boolean }): void {
+  while (collection.size > MAX_RECOVERY_ENTRIES) {
+    const oldest = collection.keys().next().value;
+    if (oldest === undefined) break;
+    collection.delete(oldest);
+  }
+}
+
+function currentRecoveryNonce(sessionKey: string | undefined, turnKey: string): number {
+  if (sessionKey) return sessionRecoveryNonces.get(sessionKey) ?? 0;
+  return turnRequestNonces.get(turnKey) ?? 0;
+}
+
+function bumpRecoveryNonce(sessionKey: string | undefined, turnKey: string): number {
+  recoveredTurnKeys.delete(turnKey);
+  recoveredTurnKeys.add(turnKey);
+  evictOldest(recoveredTurnKeys);
+
+  const map = sessionKey ? sessionRecoveryNonces : turnRequestNonces;
+  const key = sessionKey ?? turnKey;
+  const next = (map.get(key) ?? 0) + 1;
+  map.delete(key);
+  map.set(key, next);
+  evictOldest(map);
+  return next;
+}
+
+/** Exported for unit tests. */
+export function clearRecoveryNonceCache(): void {
+  turnRequestNonces.clear();
+  sessionRecoveryNonces.clear();
+  recoveredTurnKeys.clear();
+}
 
 /**
  * Cross-turn memory of the (runtimeModel, endpoint) that actually answered
@@ -1988,22 +2027,11 @@ export function resolveCapacityCandidates(
   return { routeKey, cachedRoute, runtimeCandidates };
 }
 
-function nextRequestNonce(turnKey: string): number {
-  const nonce = turnRequestNonces.get(turnKey) ?? 0;
-  turnRequestNonces.set(turnKey, nonce + 1);
-  if (turnRequestNonces.size > 64) {
-    const oldest = turnRequestNonces.keys().next().value;
-    if (oldest !== undefined) turnRequestNonces.delete(oldest);
-  }
-  return nonce;
-}
-
 /**
- * Upstream identity for a retry POST. The backend keys its per-session state on
- * this int64, and a crashed stream can keep generating server-side while the
- * backend serializes later same-session requests behind it — the literal retry
+ * Upstream identity for a recovery POST. The backend keys its per-session state on
+ * this int64, and a crashed/timed-out stream can keep generating server-side while
+ * the backend serializes later same-session requests behind it — the literal retry
  * then hangs almost deterministically even though a fresh request succeeds.
- * Every POST after the first for a turn therefore mints a fresh identity.
  */
 function retrySessionSeed(sessionId: string | undefined, nonce: number): string {
   return sessionId?.trim() ? `${sessionId}:r${nonce}` : `retry:${crypto.randomUUID()}`;
@@ -2099,17 +2127,20 @@ export function streamAntigravity(
       // Turn identity mirrors buildRequest's requestIndex (count of successful
       // assistant messages): it stays constant across retries of one turn and
       // changes the moment any turn succeeds.
+      const sessionKey = opts.sessionId?.trim() || undefined;
       const turnKey = `${opts.sessionId ?? "anonymous"}:${
         context.messages?.filter(
           (m) => m.role === "assistant" && m.stopReason !== "error" && m.stopReason !== "aborted",
         ).length ?? 0
       }`;
+      // If a prior invocation of this exact turn already suffered a stream/transport
+      // failure, advance once more on re-entry (e.g. Pi's outer auto-retry).
+      if (!opts.signal?.aborted && recoveredTurnKeys.has(turnKey)) {
+        bumpRecoveryNonce(sessionKey, turnKey);
+      }
 
       const sendRequest = async (targetRuntime: string, endpoint: string): Promise<Response> => {
-        // Every POST after the first for this turn replays under a fresh
-        // upstream session/trajectory so it cannot queue behind the crashed
-        // attempt's server-side generation (see retrySessionSeed).
-        const nonce = nextRequestNonce(turnKey);
+        const nonce = currentRecoveryNonce(sessionKey, turnKey);
         const attemptOptions =
           nonce === 0 ? opts : { ...opts, sessionId: retrySessionSeed(opts.sessionId, nonce) };
         let payload: unknown = buildRequest(
@@ -2198,6 +2229,7 @@ export function streamAntigravity(
             }
           } catch (error) {
             if (opts.signal?.aborted) throw error;
+            bumpRecoveryNonce(sessionKey, turnKey);
             preferredCapacityRoutes.delete(routeKey);
           }
         }
@@ -2219,8 +2251,9 @@ export function streamAntigravity(
                 // Caller cancellation is not an endpoint failure — propagate it. A
                 // transport failure or our own header deadline abort means this
                 // endpoint may be wedged; ENDPOINT_FALLBACKS exist for that, so
-                // fall through instead of dying without trying them.
+                // rotate the session seed and fall through instead of dying.
                 if (opts.signal?.aborted) throw error;
+                bumpRecoveryNonce(sessionKey, turnKey);
                 lastEndpointError = error instanceof Error ? error : new Error(String(error));
                 continue;
               }
@@ -2438,6 +2471,7 @@ export function streamAntigravity(
         try {
           received = await streamResponse(response, stream, output, model);
         } catch (error) {
+          if (!opts.signal?.aborted) bumpRecoveryNonce(sessionKey, turnKey);
           if (usedCachedProbe) {
             preferredCapacityRoutes.delete(routeKey);
             if (!opts.signal?.aborted && output.content.length === 0) {
@@ -2462,6 +2496,7 @@ export function streamAntigravity(
           }
           break;
         }
+        if (!opts.signal?.aborted) bumpRecoveryNonce(sessionKey, turnKey);
         if (usedCachedProbe) {
           preferredCapacityRoutes.delete(routeKey);
         }

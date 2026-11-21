@@ -7,6 +7,7 @@ import {
   buildRequest,
   capacityAttemptLimit,
   clearCapacityRouteCache,
+  clearRecoveryNonceCache,
   isCapacityFailure,
   isGenericResourceExhausted,
   streamAntigravity,
@@ -59,6 +60,7 @@ const EMPTY_STREAM =
 function restoreEnv(): void {
   globalThis.fetch = savedFetch;
   clearCapacityRouteCache();
+  clearRecoveryNonceCache();
   for (const [key, value] of Object.entries(savedEnv)) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
@@ -97,6 +99,8 @@ try {
   clearCapacityRouteCache();
   let calls = 0;
   const modelsSeen: string[] = [];
+  const sessionIdsSeen: string[] = [];
+  const trajectoryIdsSeen: string[] = [];
   let firstPassBody: Record<string, unknown> | undefined;
   globalThis.fetch = (async (_url, init) => {
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -104,6 +108,9 @@ try {
     calls++;
     const reqModel = String(body.model ?? "");
     modelsSeen.push(reqModel);
+    const req = (body.request ?? {}) as { sessionId?: string; labels?: { trajectory_id?: string } };
+    if (req.sessionId) sessionIdsSeen.push(req.sessionId);
+    if (req.labels?.trajectory_id) trajectoryIdsSeen.push(req.labels.trajectory_id);
     // Fail all 8 calls of pass 1 plus the 2 high-tier calls of pass 2; succeed on pass-2 medium.
     if (calls <= 10 || reqModel !== "gemini-3.8-flash-medium") {
       return new Response(GENERIC_429, {
@@ -116,12 +123,36 @@ try {
   const recovered = await streamAntigravity(model, { messages: [] }, options).result();
   assert.equal(recovered.stopReason, "stop", recovered.errorMessage);
   assert.ok(calls >= 11, `expected outer retry into pass-2 sibling tier (calls=${calls})`);
+  assert.equal(
+    new Set(sessionIdsSeen).size,
+    1,
+    `429 capacity retries and endpoint/model fallbacks should preserve sessionId (${JSON.stringify(sessionIdsSeen)})`,
+  );
+  assert.equal(
+    new Set(trajectoryIdsSeen).size,
+    1,
+    "429 capacity retries should preserve trajectory_id",
+  );
   assert.ok(
     modelsSeen.includes("gemini-3.7-flash-high"),
     `expected queued compatibility fallback during pass 1, saw ${JSON.stringify(modelsSeen)}`,
   );
   assert.equal(modelsSeen.at(-1), "gemini-3.8-flash-medium");
   assert.equal(firstPassBody?.requestType, "agent");
+
+  // Subsequent turn after 429 fallback keeps the exact same deterministic sessionId,
+  // and cachedRoute HTTP 429 eviction also preserves sessionId.
+  const turn2 = await streamAntigravity(
+    model,
+    { messages: [{ role: "user", content: "hi", timestamp: 1 }, recovered] },
+    options,
+  ).result();
+  assert.equal(turn2.stopReason, "stop", turn2.errorMessage);
+  assert.equal(
+    new Set(sessionIdsSeen).size,
+    1,
+    "subsequent turn and cachedRoute probe after 429 recovery must keep the same sessionId",
+  );
 
   // Caller abort during a long capacity backoff cancels promptly instead of waiting out the timer.
   clearCapacityRouteCache();
