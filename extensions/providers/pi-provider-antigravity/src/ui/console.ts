@@ -62,6 +62,17 @@ import { copyToClipboard, openUrlInBrowser } from "./platform.js";
 
 export type ConsoleTab = "accounts" | "models" | "diagnostics";
 
+const STALE_STATIC_FALLBACK_IDS = new Set([
+  "gemini-3.5-flash",
+  "gemini-3.6-flash",
+  "gemini-3.7-flash",
+  "gemini-3.8-flash",
+  "gemini-3.1-pro",
+  "claude-opus-4-6",
+  "claude-sonnet-4-6",
+  "gpt-oss-120b",
+]);
+
 const ALL_THINKING_LEVELS: Array<{ level: "low" | "medium" | "high" | "xhigh"; label: string }> = [
   { level: "low", label: "low" },
   { level: "medium", label: "med" },
@@ -1479,14 +1490,51 @@ export class AntigravityConsole implements Component, Focusable {
     this.setFlash(`AI 积分超额已${!status.enabled ? "开启" : "关闭"}`, "info");
   }
 
+  private refreshCatalogAfterAuth(promoteLatestIfStale: boolean): void {
+    const refreshPromise =
+      typeof this.ctx.modelRegistry?.refresh === "function"
+        ? this.ctx.modelRegistry.refresh({ providers: [PROVIDER_ID], force: true })
+        : undefined;
+    if (!refreshPromise) return;
+    void refreshPromise
+      .then(async () => {
+        if (this.disposed) return;
+        this.reloadData();
+        if (promoteLatestIfStale) {
+          const cur = this.ctx.model;
+          const isStaleOrUnset =
+            !cur || (cur.provider === PROVIDER_ID && STALE_STATIC_FALLBACK_IDS.has(cur.id));
+          if (isStaleOrUnset) {
+            const available = this.ctx.modelRegistry
+              .getAvailable()
+              .filter((m) => m.provider === PROVIDER_ID);
+            const preferred =
+              available.find((m) => m.id === "gemini-4-hydrogen") ??
+              available.find((m) => m.id === "gemini-4-neon") ??
+              available.find((m) => m.id.startsWith("gemini-4")) ??
+              available[0];
+            if (preferred && (!cur || cur.id !== preferred.id)) {
+              await this.pi.setModel(preferred).catch(() => {});
+            }
+          }
+        }
+        this.setFlash(`模型目录已同步 · ${getCurrentAntigravityCatalog().models.length} 个`, "success");
+      })
+      .catch(() => {});
+  }
+
   private openInlineLogin(): void {
     this.loginState = startInlineLogin({
       onUpdate: () => this.tui.requestRender(),
       onSuccess: (creds) => {
         this.loginState = undefined;
         this.reloadData();
-        void activateAccount(creds.email ?? "").catch(() => {});
-        this.setFlash(`已登录 ${shortEmail(creds.email, this.settings.maskEmails)}`, "success");
+        void activateAccount(creds.email ?? "")
+          .catch(() => {})
+          .finally(() => {
+            this.refreshCatalogAfterAuth(true);
+          });
+        this.setFlash(`已登录 ${shortEmail(creds.email, this.settings.maskEmails)}，正在同步最新模型…`, "success");
         this.triggerRefreshAll();
       },
       onCancel: () => {

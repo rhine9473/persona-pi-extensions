@@ -844,8 +844,8 @@ const extraAllowedCatalog = buildAntigravityCatalog(
   ],
 );
 assert.deepEqual(
-  extraAllowedCatalog.models.map((model) => model.id).sort(),
-  ["gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen", "gemini-4-oxygen"],
+  extraAllowedCatalog.models.map((model) => model.id),
+  ["gemini-4-hydrogen", "gemini-4-carbon", "gemini-4-argon", "gemini-4-oxygen"],
 );
 assert.equal(
   extraAllowedCatalog.routing["gemini-4-carbon"]?.routing?.high,

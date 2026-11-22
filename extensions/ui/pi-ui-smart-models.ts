@@ -90,16 +90,27 @@ function priceRank(name: string): number {
   return factor ? Number(factor[1]) : /free/i.test(badge) ? 0 : Infinity;
 }
 
-function familyAndVersionRank(model: ChatModel): [number, number] {
+function familyAndVersionRank(model: ChatModel): [number, number, number] {
   const id = model.id.toLowerCase().replace(/^[^/]+\//, "");
   const verMatch = id.match(/(\d+)(?:\.(\d+))?/);
   const ver = verMatch ? Number(verMatch[1]) * 100 + Number(verMatch[2] ?? 0) : 0;
-  if (id.startsWith("gemini-")) return [0, -ver];
-  if (id.startsWith("claude-opus")) return [1, -ver];
-  if (id.startsWith("claude-sonnet")) return [2, -ver];
-  if (id.startsWith("claude-")) return [3, -ver];
-  if (id.startsWith("gpt-")) return [4, -ver];
-  return [5, -ver];
+  const subRank = id.includes("hydrogen") && !id.includes("sonar")
+    ? 0
+    : id.includes("neon")
+      ? 1
+      : id.includes("carbon")
+        ? 2
+        : id.includes("argon")
+          ? 3
+          : id.includes("sonar")
+            ? 5
+            : 4;
+  if (id.startsWith("gemini-")) return [0, -ver, subRank];
+  if (id.startsWith("claude-opus")) return [1, -ver, 0];
+  if (id.startsWith("claude-sonnet")) return [2, -ver, 0];
+  if (id.startsWith("claude-")) return [3, -ver, 0];
+  if (id.startsWith("gpt-")) return [4, -ver, 0];
+  return [5, -ver, 0];
 }
 
 export function groupModels(models: ChatModel[]): SourceGroup[] {
@@ -114,10 +125,11 @@ export function groupModels(models: ChatModel[]): SourceGroup[] {
       const aRank = priceRank(displayModelName(a));
       const bRank = priceRank(displayModelName(b));
       if (aRank !== bRank) return aRank < bRank ? -1 : 1;
-      const [famA, verA] = familyAndVersionRank(a);
-      const [famB, verB] = familyAndVersionRank(b);
+      const [famA, verA, subA] = familyAndVersionRank(a);
+      const [famB, verB, subB] = familyAndVersionRank(b);
       if (famA !== famB) return famA - famB;
       if (verA !== verB) return verA - verB;
+      if (subA !== subB) return subA - subB;
       return (
         displayModelName(a).localeCompare(displayModelName(b), "zh-CN", { numeric: true }) ||
         a.id.localeCompare(b.id)

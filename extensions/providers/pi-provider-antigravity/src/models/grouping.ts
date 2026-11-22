@@ -507,22 +507,40 @@ function parseGeminiVersion(id: string): number {
   return Number(match[1]) * 1000 + Number(match[2] || 0);
 }
 
+function parseClaudeVersion(id: string): number {
+  const match = id.match(/^claude-(?:opus|sonnet|haiku)?-?(\d+)(?:[-.](\d+))?/i);
+  if (!match) return 0;
+  return Number(match[1]) * 1000 + Number(match[2] || 0);
+}
+
+function gemini4SubRank(id: string): number {
+  const lower = id.toLowerCase();
+  if (lower.includes("hydrogen") && !lower.includes("sonar")) return 0;
+  if (lower.includes("neon")) return 1;
+  if (lower.includes("carbon")) return 2;
+  if (lower.includes("argon")) return 3;
+  if (lower.includes("oxygen")) return 4;
+  if (lower.includes("sonar")) return 5;
+  return 6;
+}
+
 function comparePublicModels(a: AntigravityModelConfig, b: AntigravityModelConfig): number {
   const rankA = modelRank(a.id);
   const rankB = modelRank(b.id);
   if (rankA[0] !== rankB[0]) return rankA[0] - rankB[0];
   if (rankA[1] !== rankB[1]) return rankA[1] - rankB[1];
+  if (rankA[2] !== rankB[2]) return rankA[2] - rankB[2];
   return a.id.localeCompare(b.id);
 }
 
-function modelRank(id: string): [number, number] {
+function modelRank(id: string): [number, number, number] {
   const version = parseGeminiVersion(id);
-  if (/^gemini-.*flash/i.test(id) && !/pro/i.test(id)) return [0, -version];
-  if (id.startsWith("claude-opus")) return [1, 0];
-  if (id.startsWith("claude-sonnet")) return [2, 0];
-  if (id.startsWith("claude-")) return [3, 0];
-  if (/^gemini-.*pro/i.test(id)) return [4, -version];
-  if (id.startsWith("gemini-")) return [5, -version];
-  if (id.startsWith("gpt-oss")) return [6, 0];
-  return [7, 0];
+  if (id.startsWith("gemini-") && version >= 4000) return [0, -version, gemini4SubRank(id)];
+  const claudeVer = parseClaudeVersion(id);
+  if (id.startsWith("claude-opus")) return [1, -claudeVer, 0];
+  if (id.startsWith("claude-sonnet")) return [2, -claudeVer, 0];
+  if (id.startsWith("claude-")) return [3, -claudeVer, 0];
+  if (id.startsWith("gemini-")) return [4, -version, 0];
+  if (id.startsWith("gpt-oss")) return [5, 0, 0];
+  return [6, 0, 0];
 }
