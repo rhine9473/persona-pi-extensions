@@ -5,7 +5,7 @@ import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = path.resolve(here, "../..");
+const repoRoot = path.resolve(here, "../../..");
 
 const hostRoot =
   process.env.PI_TEST_HOST ||
@@ -37,9 +37,9 @@ const jiti = createJiti(import.meta.url, {
 });
 
 const { default: piUiUserCardExtension, installUserCard, uninstallUserCard } = await jiti.import(
-  path.join(here, "pi-ui-user-card.ts"),
+  path.join(here, "index.ts"),
 );
-const { transformUserMarkdown } = await jiti.import(path.join(here, "pi-ui-input-fold.ts"));
+const { transformUserMarkdown } = await jiti.import(path.join(here, "../pi-ui-input-fold/index.ts"));
 
 const stripOscAndAnsi = (s) =>
   s

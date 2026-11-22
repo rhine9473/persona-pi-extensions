@@ -13,15 +13,15 @@ Rhine 的个人专属 Pi Agent 扩展套件，按大类与统一前缀整理。
 3. **`pi-ui-extension-manager`** (`/extension-manager`)
    - 终端全屏 TUI 扩展与包管理器。
    - 集中浏览、搜索扩展与包，查看用途与配置状态，支持单项/整包开关、差异对比、回滚与热重载。
-2. **`pi-ui-smart-models`** (`/models`, `/m`, `Alt+M`)
+4. **`pi-ui-smart-models`** (`/models`, `/m`, `Alt+M`)
    - 智能模型选择与最近使用记录，按上游供应商分类呈现，支持模糊搜索与快速切换。
-3. **`pi-ui-sessions`** (`/sessions`)
+5. **`pi-ui-sessions`** (`/sessions`)
    - 双栏历史会话选择器，带实时对话与代码变更预览，支持 `Ctrl+D` 删除、`Ctrl+B` 切换子代理、`Ctrl+T` 切换工作区。
-4. **`pi-ui-turn-time`**
+6. **`pi-ui-turn-time`**
    - 每次回答结束后在底部显示极简分隔耗时线（如 `── ✓ 耗时 2s ────`）。
-5. **`pi-ui-input-fold`**
+7. **`pi-ui-input-fold`**
    - 终端里输入或粘贴大段日志时自动折叠显示，不刷屏。
-6. **`pi-ui-image-paste`**
+8. **`pi-ui-image-paste`**
    - Windows 截图粘贴自动折叠为 `[Image #1]` 占位块。
 
 ### 2. 实用工具类 (`extensions/tools/pi-tool-*`)

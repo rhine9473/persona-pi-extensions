@@ -43,10 +43,23 @@ interface ToolFoldSlotState {
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
 const SPINNER_INTERVAL_MS = 250;
 const FALLBACK_PREVIEW_LINES = 10;
+const CODEMODE_SCRIPT_HEADER_RE = /^Script (?:completed|failed)\r?\nWall time ([\d.]+) seconds\r?\nOutput:\r?\n?/;
+const SGR_RESET = "\x1b[0m";
+const OSC8_CLOSE = "\x1b]8;;\x07";
+const TOOL_BG_TOKENS = new Set(["toolPendingBg", "toolErrorBg", "toolSuccessBg"]);
 const EMPTY_COMPONENT: Component = {
   render: () => [],
   invalidate() {},
 };
+
+interface CodemodeCallRecord {
+  id?: string;
+  name: string;
+  args?: string;
+  status?: "running" | "ok" | "error" | "cancelled";
+  durationMs?: number;
+  error?: string;
+}
 
 function sanitizeOneLine(text: string): string {
   return text.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
@@ -83,6 +96,134 @@ function summarizeCommand(command: string): string {
   return stripped || clean;
 }
 
+function summarizeCodemodeCode(code: string): { target?: string; shortTarget?: string } {
+  const lines = code
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("// @options:") && !line.startsWith("//"));
+  const toolNames: string[] = [];
+  const toolRe = /\btools\.([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g;
+  let match: RegExpExecArray | null;
+  while ((match = toolRe.exec(code))) {
+    const tool = match[1]!;
+    if (!toolNames.includes(tool)) toolNames.push(tool);
+  }
+  const firstLine = sanitizeOneLine(lines[0] ?? "");
+  if (toolNames.length > 0) {
+    const listed = toolNames.slice(0, 4).join(", ") + (toolNames.length > 4 ? ` +${toolNames.length - 4}` : "");
+    return {
+      target: firstLine ? `${listed} · ${firstLine}` : `tools: ${listed}`,
+      shortTarget: clipText(listed, 28),
+    };
+  }
+  if (!firstLine) return {};
+  return {
+    target: lines.length > 1 ? `${firstLine} (${lines.length} 行脚本)` : firstLine,
+    shortTarget: clipText(firstLine, 28),
+  };
+}
+
+function extractCodemodeCallArgSummary(rawArgs: string | undefined): string | undefined {
+  if (!rawArgs) return undefined;
+  const trimmed = rawArgs.trim();
+  if (!trimmed || trimmed === "{}") return undefined;
+  try {
+    const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      if (typeof parsed.path === "string" && parsed.path.trim()) {
+        return basename(parsed.path.trim()) || parsed.path.trim();
+      }
+      if (typeof parsed.command === "string" && parsed.command.trim()) {
+        return clipText(summarizeCommand(parsed.command), 28);
+      }
+      if (typeof parsed.pattern === "string" && parsed.pattern.trim()) {
+        return clipText(sanitizeOneLine(parsed.pattern), 20);
+      }
+      if (typeof parsed.query === "string" && parsed.query.trim()) {
+        return clipText(sanitizeOneLine(parsed.query), 20);
+      }
+      if (typeof parsed.url === "string" && parsed.url.trim()) {
+        return clipText(sanitizeOneLine(parsed.url), 24);
+      }
+      if (typeof parsed.name === "string" && parsed.name.trim()) {
+        return clipText(sanitizeOneLine(parsed.name), 20);
+      }
+    }
+  } catch {
+    // Truncated JSON preview (>200 chars): regex-extract common primary fields.
+    const pathMatch = trimmed.match(/"path"\s*:\s*"([^"]+)"/);
+    if (pathMatch?.[1]) return basename(pathMatch[1]) || pathMatch[1];
+    const cmdMatch = trimmed.match(/"command"\s*:\s*"([^"]+)"/);
+    if (cmdMatch?.[1]) return clipText(summarizeCommand(cmdMatch[1]), 28);
+  }
+  return undefined;
+}
+
+function getCodemodeCalls(result: AgentToolResult<unknown>): CodemodeCallRecord[] {
+  const details = result.details as { calls?: unknown } | undefined;
+  if (!details || !Array.isArray(details.calls)) return [];
+  return details.calls.filter(
+    (c): c is CodemodeCallRecord => Boolean(c && typeof c === "object" && typeof (c as { name?: unknown }).name === "string"),
+  );
+}
+
+function summarizeCodemodeCalls(calls: readonly CodemodeCallRecord[]): { target?: string; shortTarget?: string } {
+  if (calls.length === 0) return {};
+  const grouped = new Map<
+    string,
+    { count: number; targets: string[]; hasRunning: boolean; hasError: boolean; hasCancelled: boolean }
+  >();
+  for (const call of calls) {
+    let entry = grouped.get(call.name);
+    if (!entry) {
+      entry = { count: 0, targets: [], hasRunning: false, hasError: false, hasCancelled: false };
+      grouped.set(call.name, entry);
+    }
+    entry.count++;
+    if (call.status === "running") entry.hasRunning = true;
+    else if (call.status === "error") entry.hasError = true;
+    else if (call.status === "cancelled") entry.hasCancelled = true;
+    const arg = extractCodemodeCallArgSummary(call.args);
+    if (arg && !entry.targets.includes(arg)) entry.targets.push(arg);
+  }
+
+  const fullParts: string[] = [];
+  const shortParts: string[] = [];
+  for (const [name, info] of grouped.entries()) {
+    const badge = info.hasError ? "✕" : info.hasRunning ? "…" : info.hasCancelled ? "■" : "✓";
+    if (info.targets.length > 0) {
+      const shown = info.targets.slice(0, 3).join(", ");
+      const extra = info.count - Math.min(info.targets.length, 3);
+      fullParts.push(`${badge} ${name} ${shown}${extra > 0 ? ` +${extra}` : ""}`);
+      shortParts.push(info.count > 1 ? `${name}×${info.count}` : `${name} ${info.targets[0]}`);
+    } else if (info.count > 1) {
+      fullParts.push(`${badge} ${name}×${info.count}`);
+      shortParts.push(`${name}×${info.count}`);
+    } else {
+      fullParts.push(`${badge} ${name}`);
+      shortParts.push(name);
+    }
+  }
+  return {
+    target: fullParts.join(" · "),
+    shortTarget: clipText(shortParts.join(", "), 28),
+  };
+}
+
+function extractCodemodeWallTimeMs(result: AgentToolResult<unknown>): number | undefined {
+  for (const part of result.content ?? []) {
+    if (part.type === "text" && typeof part.text === "string") {
+      const match = part.text.match(CODEMODE_SCRIPT_HEADER_RE);
+      if (match?.[1]) {
+        const secs = Number(match[1]);
+        if (Number.isFinite(secs) && secs >= 0) return Math.round(secs * 1000);
+      }
+    }
+  }
+  return undefined;
+}
+
 function extractTargets(
   name: string,
   args: unknown,
@@ -90,6 +231,9 @@ function extractTargets(
 ): { target?: string; shortTarget?: string } {
   if (!args || typeof args !== "object" || Array.isArray(args)) return {};
   const rec = args as Record<string, unknown>;
+  if (name === "codemode" && typeof rec.code === "string" && rec.code.trim()) {
+    return summarizeCodemodeCode(rec.code);
+  }
   if (typeof rec.path === "string" && rec.path.trim()) {
     const full = displayPath(rec.path.trim(), cwd);
     const short = basename(full) || full;
@@ -126,8 +270,16 @@ function extractResultMeta(name: string, result: AgentToolResult<unknown>): stri
   let lineCount = 0;
   for (const part of result.content ?? []) {
     if (part.type === "text" && typeof part.text === "string" && part.text.trim()) {
-      lineCount += part.text.split(/\r?\n/).filter((l) => l.length > 0).length;
+      const text = name === "codemode" ? part.text.replace(CODEMODE_SCRIPT_HEADER_RE, "") : part.text;
+      lineCount += text.split(/\r?\n/).filter((l) => l.trim().length > 0).length;
     }
+  }
+  if (name === "codemode") {
+    const callCount = getCodemodeCalls(result).length;
+    if (callCount > 0 && lineCount > 0) return `${callCount} 次调用 · ${lineCount} 行`;
+    if (callCount > 0) return `${callCount} 次调用`;
+    if (lineCount > 0) return `${lineCount} 行`;
+    return undefined;
   }
   if ((name === "read" || name === "bash" || name === "grep" || name === "find") && lineCount > 0) {
     return `${lineCount} 行`;
@@ -135,14 +287,21 @@ function extractResultMeta(name: string, result: AgentToolResult<unknown>): stri
   return undefined;
 }
 
-function extractErrorLine(result: AgentToolResult<unknown>): string | undefined {
+function extractErrorLine(name: string, result: AgentToolResult<unknown>): string | undefined {
   const lines: string[] = [];
   for (const part of result.content ?? []) {
     if (part.type === "text" && typeof part.text === "string") {
-      for (const raw of part.text.split(/\r?\n/)) {
+      const rawText = name === "codemode" ? part.text.replace(CODEMODE_SCRIPT_HEADER_RE, "") : part.text;
+      for (const raw of rawText.split(/\r?\n/)) {
         const cleaned = sanitizeOneLine(raw);
         if (cleaned) lines.push(cleaned);
       }
+    }
+  }
+  if (name === "codemode") {
+    const failedCall = getCodemodeCalls(result).find((c) => c.status === "error" && c.error);
+    if (failedCall && lines.length === 0) {
+      return `${failedCall.name}: ${sanitizeOneLine(failedCall.error!)}`;
     }
   }
   if (lines.length === 0) return undefined;
@@ -246,6 +405,186 @@ function padRight(text: string, targetWidth: number): string {
   return w >= targetWidth ? clipped : `${clipped}${" ".repeat(targetWidth - w)}`;
 }
 
+function stripAnsiForCheck(text: string): string {
+  return text.replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "").replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
+}
+
+function isImageEscapeLine(line: string): boolean {
+  return line.includes("\x1b_G") || line.includes("\x1b]1337;File=") || /\x1bP[0-9;]*q/.test(line);
+}
+
+function createTranslucentTheme(theme: Theme): Theme {
+  return Object.assign(Object.create(theme), {
+    bg(color: string, text: string) {
+      return TOOL_BG_TOKENS.has(color) ? text : theme.bg(color as never, text);
+    },
+  });
+}
+
+function trimOuterBlankLines(lines: readonly string[]): string[] {
+  let start = 0;
+  let end = lines.length;
+  while (start < end && !isImageEscapeLine(lines[start]!) && stripAnsiForCheck(lines[start]!).trim().length === 0) {
+    start++;
+  }
+  while (end > start && !isImageEscapeLine(lines[end - 1]!) && stripAnsiForCheck(lines[end - 1]!).trim().length === 0) {
+    end--;
+  }
+  return lines.slice(start, end);
+}
+
+function hasUnclosedOsc8(text: string): boolean {
+  const re = /\x1b\]8;;([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
+  let open = false;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(text))) {
+    open = match[1]!.length > 0;
+  }
+  return open;
+}
+
+function frameContentLine(line: string, contentWidth: number, padStr: string, side: string): string {
+  const fitted = visibleWidth(line) > contentWidth ? truncateToWidth(line, contentWidth, "…") : line;
+  const closeSeq = hasUnclosedOsc8(fitted) ? `${OSC8_CLOSE}${SGR_RESET}` : SGR_RESET;
+  const w = visibleWidth(fitted);
+  const trailing = w < contentWidth ? " ".repeat(contentWidth - w) : "";
+  return `${padStr}${side} ${fitted}${closeSeq}${trailing} ${side}`;
+}
+
+function renderExpandedCard(
+  toolName: string,
+  member: MemberState | undefined,
+  slot: ToolFoldSlotState,
+  width: number,
+  theme: Theme,
+  outputPad: number,
+  now: number,
+): string[] {
+  const pad = Math.max(0, outputPad);
+  const padStr = " ".repeat(pad);
+  const ctxNow = slot.latestContext;
+
+  if (slot.baseCallComponent instanceof Box) {
+    slot.baseCallComponent.setPaddingX(0);
+  }
+
+  const boxWidth = width - pad * 2;
+  const innerWidth = boxWidth - 2;
+  const contentWidth = innerWidth - 2;
+
+  if (width < 20 || contentWidth < 8) {
+    const callLines = slot.baseCallComponent?.render(Math.max(1, width - pad)) ?? [];
+    const resLines = slot.baseResultComponent?.render(Math.max(1, width - pad)) ?? [];
+    return [...callLines, ...resLines].map((line) =>
+      isImageEscapeLine(line)
+        ? line
+        : truncateToWidth(`${padStr}${line}`, Math.max(1, width), ""),
+    );
+  }
+
+  const status: MemberStatus =
+    member?.status ?? (slot.latestIsPartial ? "running" : ctxNow?.isError ? "error" : "ok");
+  let borderToken: "border" | "warning" | "error" | "borderMuted" = "border";
+  let titleText = "";
+  const metaParts: string[] = [];
+
+  const durationMs =
+    member?.durationMs ??
+    (member?.endedAt !== undefined && member?.startedAt !== undefined
+      ? Math.max(0, member.endedAt - member.startedAt)
+      : status === "running" && member?.startedAt !== undefined
+        ? Math.max(0, now - member.startedAt)
+        : undefined);
+  const elapsedStr = durationMs !== undefined ? formatDuration(durationMs) : "";
+
+  if (status === "running") {
+    borderToken = "warning";
+    titleText = `${theme.fg("warning", "…")} ${theme.fg("toolTitle", theme.bold(toolName))}`;
+    if (elapsedStr) metaParts.push(elapsedStr);
+  } else if (status === "queued") {
+    borderToken = "borderMuted";
+    titleText = `${theme.fg("dim", "◌")} ${theme.fg("toolTitle", theme.bold(toolName))}`;
+    metaParts.push("queued");
+  } else if (status === "error") {
+    borderToken = "error";
+    titleText = `${theme.fg("error", "✕")} ${theme.fg("error", theme.bold(toolName))}`;
+    if (member?.resultMeta) metaParts.push(member.resultMeta);
+    if (member && member.imageCount > 0) {
+      metaParts.push(`${member.imageCount} image${member.imageCount > 1 ? "s" : ""}`);
+    }
+    if (elapsedStr) metaParts.push(elapsedStr);
+  } else if (status === "aborted") {
+    borderToken = "borderMuted";
+    titleText = `${theme.fg("muted", "■")} ${theme.fg("toolTitle", theme.bold(toolName))}`;
+    metaParts.push("aborted");
+    if (elapsedStr) metaParts.push(elapsedStr);
+  } else {
+    borderToken = "border";
+    titleText = `${theme.fg("success", "✓")} ${theme.fg("toolTitle", theme.bold(toolName))}`;
+    if (member?.resultMeta) metaParts.push(member.resultMeta);
+    if (member && member.imageCount > 0) {
+      metaParts.push(`${member.imageCount} image${member.imageCount > 1 ? "s" : ""}`);
+    }
+    if (elapsedStr) metaParts.push(elapsedStr);
+  }
+
+  const metaText = metaParts.join(" · ");
+  const metaPart = metaText ? ` ${metaText} ` : "";
+  const clippedTitle = truncateToWidth(
+    ` ${titleText} `,
+    Math.max(4, innerWidth - visibleWidth(metaPart) - (metaPart ? 3 : 2)),
+    "…",
+  );
+  const fillCount = Math.max(
+    1,
+    innerWidth - visibleWidth(clippedTitle) - visibleWidth(metaPart) - (metaPart ? 2 : 1),
+  );
+  const b = (s: string) => theme.fg(borderToken, s);
+  const side = b("│");
+
+  const topLine =
+    `${padStr}${b("╭─")}${clippedTitle}${b("─".repeat(fillCount))}` +
+    (metaPart ? `${theme.fg("dim", metaPart)}${b("─")}` : "") +
+    b("╮");
+  const bottomLine = `${padStr}${b(`╰${"─".repeat(innerWidth)}╯`)}`;
+
+  const rawCallLines = slot.baseCallComponent?.render(contentWidth) ?? [];
+  const rawResLines = slot.baseResultComponent?.render(contentWidth) ?? [];
+  const callHasImages = rawCallLines.some(isImageEscapeLine);
+  const resHasImages = rawResLines.some(isImageEscapeLine);
+
+  const callLines = callHasImages ? [] : trimOuterBlankLines(rawCallLines);
+  if (callLines.length > 1 && stripAnsiForCheck(callLines[0]!).trim() === toolName) {
+    callLines.shift();
+  }
+  const resLines = resHasImages ? [] : trimOuterBlankLines(rawResLines);
+
+  const framedBody: string[] = [];
+  for (const line of callLines) {
+    framedBody.push(frameContentLine(line, contentWidth, padStr, side));
+  }
+  if (callLines.length > 0 && resLines.length > 0) {
+    framedBody.push(`${padStr}${side} ${theme.fg("borderMuted", "─".repeat(contentWidth))} ${side}`);
+  }
+  for (const line of resLines) {
+    framedBody.push(frameContentLine(line, contentWidth, padStr, side));
+  }
+  if (framedBody.length === 0 && !callHasImages && !resHasImages) {
+    if (member?.target) {
+      framedBody.push(frameContentLine(theme.fg("text", member.target), contentWidth, padStr, side));
+    } else {
+      framedBody.push(`${padStr}${side}${" ".repeat(innerWidth)}${side}`);
+    }
+  }
+
+  const cardLines = [topLine, ...framedBody, bottomLine].map((line) =>
+    visibleWidth(line) > width ? truncateToWidth(line, width, "") : line,
+  );
+  if (callHasImages) cardLines.push(...rawCallLines);
+  if (resHasImages) cardLines.push(...rawResLines);
+  return cardLines;
+}
+
 function renderSummaryBox(
   items: readonly MemberState[],
   width: number,
@@ -265,11 +604,21 @@ function renderSummaryBox(
   const elapsed = groupElapsedMs(items, now);
   const elapsedStr = elapsed !== undefined ? formatDuration(elapsed) : "";
 
-  const boxWidth = Math.max(24, width - outputPad * 2);
+  const availableWidth = width - Math.max(0, outputPad) * 2;
+  if (width < 20 || availableWidth < 12) {
+    const first = items[0];
+    const line = first ? `${first.name}${first.shortTarget ? ` ${first.shortTarget}` : ""}` : "tools";
+    return [truncateToWidth(`${pad}${line}`, Math.max(1, width), "…")];
+  }
+  const boxWidth = availableWidth;
   const innerWidth = Math.max(10, boxWidth - 2);
   const targetMax = Math.max(24, innerWidth - 4);
   const formatSingleTarget = (m: MemberState) =>
-    m.target ? (m.name === "bash" ? clipText(m.target, targetMax) : clipPathTail(m.target, targetMax)) : undefined;
+    m.target
+      ? m.name === "read" || m.name === "write" || m.name === "edit" || m.name === "grep" || m.name === "find"
+        ? clipPathTail(m.target, targetMax)
+        : clipText(m.target, targetMax)
+      : undefined;
 
   let borderToken: "border" | "warning" | "error" | "borderMuted" = "border";
   let titleText = "";
@@ -368,9 +717,9 @@ function renderSummaryBox(
   const side = b("│");
   const bottomLine = `${pad}${b(`╰${"─".repeat(innerWidth)}╯`)}`;
 
-  const framedBody = bodyLines.map((line) => `${pad}${side}${padRight(line, innerWidth)}${side}`);
+  const framedBody = bodyLines.map((line) => `${pad}${side}${padRight(line, innerWidth)}${SGR_RESET}${side}`);
   return [topLine, ...framedBody, bottomLine].map((line) =>
-    truncateToWidth(line, Math.max(1, width), theme.fg("dim", "…")),
+    visibleWidth(line) > width ? truncateToWidth(line, Math.max(1, width), "") : line,
   );
 }
 
@@ -414,6 +763,8 @@ export default function piUiToolFoldExtension(pi: ExtensionAPI) {
   const groups = new Map<string, string[]>();
   const toolToGroup = new Map<string, string>();
   const members = new Map<string, MemberState>();
+  const slotsById = new Map<string, ToolFoldSlotState>();
+  const toolNamesById = new Map<string, string>();
   let spinnerIdx = 0;
   let timer: ReturnType<typeof setInterval> | undefined;
 
@@ -569,6 +920,8 @@ export default function piUiToolFoldExtension(pi: ExtensionAPI) {
     groups.clear();
     toolToGroup.clear();
     members.clear();
+    slotsById.clear();
+    toolNamesById.clear();
     activeCtx = undefined;
     enabled = undefined;
   });
@@ -586,6 +939,45 @@ export default function piUiToolFoldExtension(pi: ExtensionAPI) {
       return slot;
     };
 
+    const renderBaseCall = (
+      args: unknown,
+      theme: Theme,
+      context: ToolRenderContext,
+      slot: ToolFoldSlotState,
+    ): Component => {
+      const effectiveTheme = slot.isExport ? theme : createTranslucentTheme(theme);
+      const effectiveCtx: ToolRenderContext = slot.isExport
+        ? { ...context, lastComponent: slot.baseCallComponent }
+        : { ...context, outputPad: 0, lastComponent: slot.baseCallComponent };
+      const comp = base?.renderCall
+        ? base.renderCall(args, effectiveTheme, effectiveCtx)
+        : createFallbackCallComponent(toolName, args, effectiveTheme);
+      if (!slot.isExport && comp instanceof Box) {
+        comp.setPaddingX(0);
+      }
+      return comp;
+    };
+
+    const renderBaseResult = (
+      result: AgentToolResult<unknown>,
+      options: { expanded: boolean; isPartial: boolean },
+      theme: Theme,
+      context: ToolRenderContext,
+      slot: ToolFoldSlotState,
+    ): Component | undefined => {
+      const effectiveTheme = slot.isExport ? theme : createTranslucentTheme(theme);
+      const effectiveCtx: ToolRenderContext = slot.isExport
+        ? { ...context, lastComponent: slot.baseResultComponent }
+        : { ...context, outputPad: 0, lastComponent: slot.baseResultComponent };
+      const comp = base?.renderResult
+        ? base.renderResult(result, options, effectiveTheme, effectiveCtx)
+        : createFallbackResultComponent(result, effectiveTheme, options.expanded, context.keyHint);
+      if (!slot.isExport && comp instanceof Box) {
+        comp.setPaddingX(0);
+      }
+      return comp;
+    };
+
     return {
       renderShell: "self",
       renderCall(args, theme, context) {
@@ -595,13 +987,10 @@ export default function piUiToolFoldExtension(pi: ExtensionAPI) {
           slot.isExport = Boolean(context.executionStarted && context.argsComplete);
         }
         slot.latestContext = context;
+        slotsById.set(context.toolCallId, slot);
+        toolNamesById.set(context.toolCallId, toolName);
 
-        const baseCall = base?.renderCall
-          ? base.renderCall(args, theme, {
-              ...context,
-              lastComponent: slot.baseCallComponent,
-            })
-          : createFallbackCallComponent(toolName, args, theme);
+        const baseCall = renderBaseCall(args, theme, context, slot);
         slot.baseCallComponent = baseCall;
 
         if (slot.isExport) {
@@ -640,15 +1029,18 @@ export default function piUiToolFoldExtension(pi: ExtensionAPI) {
           slot.slotComponent = {
             render(width) {
               const ctxNow = slot.latestContext;
-              const expanded = Boolean(ctxNow?.expanded || activeCtx?.ui?.getToolsExpanded?.());
+              const globalExpanded = Boolean(activeCtx?.ui?.getToolsExpanded?.());
+              const expanded = Boolean(ctxNow?.expanded || globalExpanded);
               const gid = ctxNow ? toolToGroup.get(ctxNow.toolCallId) : undefined;
               const groupIds = gid ? (groups.get(gid) ?? []).filter((id) => members.has(id)) : [];
+              const leaderId = groupIds[0];
 
-              if (enabled === false || expanded || !gid || groupIds.length === 0) {
+              if (enabled === false) {
                 if (base?.renderShell === "self") {
-                  const callLines = slot.baseCallComponent?.render(width) ?? [];
-                  const resLines = slot.baseResultComponent?.render(width) ?? [];
-                  return [...callLines, ...resLines];
+                  return [
+                    ...(slot.baseCallComponent?.render(width) ?? []),
+                    ...(slot.baseResultComponent?.render(width) ?? []),
+                  ];
                 }
                 const bgFn = slot.latestIsPartial
                   ? (t: string) => theme.bg("toolPendingBg", t)
@@ -661,7 +1053,43 @@ export default function piUiToolFoldExtension(pi: ExtensionAPI) {
                 return box.render(width);
               }
 
-              const leaderId = groupIds[0];
+              if (expanded || !gid || groupIds.length === 0) {
+                if (base?.renderShell === "self" && !(slot.baseCallComponent instanceof Box)) {
+                  return [
+                    ...(slot.baseCallComponent?.render(width) ?? []),
+                    ...(slot.baseResultComponent?.render(width) ?? []),
+                  ];
+                }
+                const now = Date.now();
+                const ownId = ctxNow?.toolCallId;
+                // Clicking a folded multi-tool box only flips ctx.expanded on the leader component;
+                // render expanded cards for all group members together when global Ctrl+O is off.
+                if (!globalExpanded && expanded && ownId && ownId === leaderId && groupIds.length > 1) {
+                  const combined: string[] = [];
+                  for (const id of groupIds) {
+                    const mSlot = slotsById.get(id);
+                    const mMember = members.get(id);
+                    const mName = toolNamesById.get(id) ?? mMember?.name ?? toolName;
+                    if (!mSlot) continue;
+                    if (combined.length > 0) combined.push("");
+                    combined.push(
+                      ...renderExpandedCard(mName, mMember, mSlot, width, theme, ctxNow?.outputPad ?? 1, now),
+                    );
+                  }
+                  if (combined.length > 0) return combined;
+                }
+                const member = ownId ? members.get(ownId) : undefined;
+                return renderExpandedCard(
+                  toolName,
+                  member,
+                  slot,
+                  width,
+                  theme,
+                  ctxNow?.outputPad ?? 1,
+                  now,
+                );
+              }
+
               if (ctxNow?.toolCallId !== leaderId) {
                 return [];
               }
@@ -689,15 +1117,16 @@ export default function piUiToolFoldExtension(pi: ExtensionAPI) {
       },
       renderResult(result, options, theme, context) {
         const slot = getToolFoldState(context.state as Record<string, unknown>);
+        if (!slot.initialized) {
+          slot.initialized = true;
+          slot.isExport = Boolean(context.executionStarted && context.argsComplete);
+        }
         slot.latestContext = context;
         slot.latestIsPartial = options.isPartial;
+        slotsById.set(context.toolCallId, slot);
+        toolNamesById.set(context.toolCallId, toolName);
 
-        const baseRes = base?.renderResult
-          ? base.renderResult(result, options, theme, {
-              ...context,
-              lastComponent: slot.baseResultComponent,
-            })
-          : createFallbackResultComponent(result, theme, options.expanded, context.keyHint);
+        const baseRes = renderBaseResult(result, options, theme, context, slot);
         slot.baseResultComponent = baseRes;
 
         if (slot.isExport) {
@@ -711,17 +1140,24 @@ export default function piUiToolFoldExtension(pi: ExtensionAPI) {
           : options.isPartial
             ? "running"
             : "ok";
+        const codemodeCalls = toolName === "codemode" ? getCodemodeCalls(result) : [];
+        const codemodeSummary = codemodeCalls.length > 0 ? summarizeCodemodeCalls(codemodeCalls) : {};
+        const durationMs = options.isPartial
+          ? undefined
+          : context.durationMs ??
+            (toolName === "codemode" ? extractCodemodeWallTimeMs(result) : undefined) ??
+            existing?.durationMs;
         const member: MemberState = {
           id: context.toolCallId,
           name: existing?.name ?? toolName,
           status,
           startedAt: existing?.startedAt ?? (options.isPartial ? now : undefined),
           endedAt: options.isPartial ? undefined : existing?.endedAt ?? now,
-          durationMs: options.isPartial ? undefined : context.durationMs ?? existing?.durationMs,
-          target: existing?.target,
-          shortTarget: existing?.shortTarget,
+          durationMs,
+          target: codemodeSummary.target ?? existing?.target,
+          shortTarget: codemodeSummary.shortTarget ?? existing?.shortTarget,
           resultMeta: options.isPartial ? existing?.resultMeta : extractResultMeta(toolName, result),
-          errorLine: context.isError ? extractErrorLine(result) : undefined,
+          errorLine: context.isError ? extractErrorLine(toolName, result) : undefined,
           imageCount: countImages(result),
           outputPad: context.outputPad,
           invalidate: context.invalidate,

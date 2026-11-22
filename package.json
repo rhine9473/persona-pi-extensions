@@ -8,20 +8,20 @@
   ],
   "type": "module",
   "scripts": {
-    "test": "node scripts/check-repo.mjs && node --test extensions/ui/pi-ui-extension-manager/*.test.mjs extensions/ui/pi-ui-tool-fold.test.mjs extensions/ui/pi-ui-user-card.test.mjs && cd extensions/providers/pi-provider-antigravity && node scripts/run-ts.mjs scripts/test-accounts.ts && node scripts/run-ts.mjs scripts/test-hot-failover-and-ui.ts && node scripts/run-ts.mjs scripts/test-oauth-fetch.ts && node scripts/run-ts.mjs scripts/test-http-proxy.ts && node scripts/run-ts.mjs scripts/test-model-routing.ts && node scripts/run-ts.mjs scripts/test-model-discovery.ts && node scripts/run-ts.mjs scripts/test-model-pricing.ts && node scripts/run-ts.mjs scripts/test-usage-formatter.ts && node scripts/run-ts.mjs scripts/test-stream-sse.ts && node scripts/run-ts.mjs scripts/test-stream-header-deadline.ts && node scripts/run-ts.mjs scripts/test-stream-recovery.ts && node scripts/run-ts.mjs scripts/test-capacity-retry.ts && node scripts/run-ts.mjs scripts/test-inline-system.ts && node scripts/run-ts.mjs scripts/test-sanitize-text.ts && node scripts/run-ts.mjs scripts/test-transcript-context.ts && node scripts/run-ts.mjs scripts/test-provider-registration.ts"
+    "test": "node scripts/check-repo.mjs && node --test extensions/ui/*/*.test.mjs && cd extensions/providers/pi-provider-antigravity && node scripts/run-ts.mjs scripts/test-accounts.ts && node scripts/run-ts.mjs scripts/test-hot-failover-and-ui.ts && node scripts/run-ts.mjs scripts/test-oauth-fetch.ts && node scripts/run-ts.mjs scripts/test-http-proxy.ts && node scripts/run-ts.mjs scripts/test-model-routing.ts && node scripts/run-ts.mjs scripts/test-model-discovery.ts && node scripts/run-ts.mjs scripts/test-model-pricing.ts && node scripts/run-ts.mjs scripts/test-usage-formatter.ts && node scripts/run-ts.mjs scripts/test-stream-sse.ts && node scripts/run-ts.mjs scripts/test-stream-header-deadline.ts && node scripts/run-ts.mjs scripts/test-stream-recovery.ts && node scripts/run-ts.mjs scripts/test-capacity-retry.ts && node scripts/run-ts.mjs scripts/test-inline-system.ts && node scripts/run-ts.mjs scripts/test-sanitize-text.ts && node scripts/run-ts.mjs scripts/test-transcript-context.ts && node scripts/run-ts.mjs scripts/test-provider-registration.ts"
   },
   "pi": {
     "extensions": [
-      "./extensions/ui/pi-ui-tool-fold.ts",
-      "./extensions/ui/pi-ui-user-card.ts",
+      "./extensions/ui/pi-ui-tool-fold",
+      "./extensions/ui/pi-ui-user-card",
       "./extensions/ui/pi-ui-extension-manager",
-      "./extensions/ui/pi-ui-smart-models.ts",
+      "./extensions/ui/pi-ui-smart-models",
       "./extensions/ui/pi-ui-sessions",
-      "./extensions/ui/pi-ui-turn-time.ts",
-      "./extensions/ui/pi-ui-input-fold.ts",
+      "./extensions/ui/pi-ui-turn-time",
+      "./extensions/ui/pi-ui-input-fold",
       "./extensions/ui/pi-ui-image-paste",
       "./extensions/tools/pi-tool-subagents",
-      "./extensions/tools/pi-tool-bash-timeout.ts",
+      "./extensions/tools/pi-tool-bash-timeout",
       "./extensions/providers/pi-provider-antigravity/src/index.ts"
     ],
     "skills": [

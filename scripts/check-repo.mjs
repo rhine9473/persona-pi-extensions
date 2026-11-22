@@ -102,7 +102,7 @@ try {
     groupModels,
     loadModelThinkingLevel,
     modelSource,
-  } = await import(pathToFileURL(path.join(repoRoot, "extensions/ui/pi-ui-smart-models.ts")).href);
+  } = await import(pathToFileURL(path.join(repoRoot, "extensions/ui/pi-ui-smart-models/index.ts")).href);
 
   const hydro = {
     provider: "antigravity",
