@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { antigravityFetch } from "../src/utils/http.js";
+import { antigravityFetch, parseWindowsProxyServer } from "../src/utils/http.js";
 
 const proxyEnvNames = [
   "HTTP_PROXY",
@@ -25,6 +25,14 @@ try {
   assert.equal(response.status, 204);
   assert.ok(requestInit);
   assert.equal("dispatcher" in requestInit, false);
+
+  assert.equal(parseWindowsProxyServer("127.0.0.1:7890"), "http://127.0.0.1:7890");
+  assert.equal(parseWindowsProxyServer("http://127.0.0.1:7890"), "http://127.0.0.1:7890");
+  assert.equal(
+    parseWindowsProxyServer("http=127.0.0.1:7890;https=127.0.0.1:7891"),
+    "http://127.0.0.1:7891",
+  );
+  assert.equal(parseWindowsProxyServer("socks=127.0.0.1:1080"), undefined);
 } finally {
   globalThis.fetch = originalFetch;
   for (const name of proxyEnvNames) {

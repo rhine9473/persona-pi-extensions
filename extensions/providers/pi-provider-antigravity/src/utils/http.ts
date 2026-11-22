@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+import { ProxyAgent, fetch as undiciFetch, getGlobalDispatcher, MockAgent } from "undici";
 import { antigravityEnv } from "./util.js";
 
 /**
@@ -24,6 +26,69 @@ type DispatcherInit = RequestInit & { dispatcher?: unknown };
 
 let dispatcherPromise: Promise<unknown> | undefined;
 let prewarmStarted = false;
+
+const NATIVE_FETCH = globalThis.fetch;
+const WINDOWS_PROXY_TTL_MS = 30_000;
+let windowsProxyCache: { checkedAt: number; url: string | undefined } | undefined;
+let windowsProxyAgentCache: { url: string; agent: ProxyAgent } | undefined;
+
+export function parseWindowsProxyServer(raw: string): string | undefined {
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  if (!trimmed.includes("=")) {
+    if (/^socks/i.test(trimmed)) return undefined;
+    return /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+  }
+  const entries = new Map<string, string>();
+  for (const part of trimmed.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq <= 0) continue;
+    const proto = part.slice(0, eq).trim().toLowerCase();
+    const addr = part.slice(eq + 1).trim();
+    if (proto && addr) entries.set(proto, addr);
+  }
+  const chosen = entries.get("https") ?? entries.get("http");
+  if (!chosen) return undefined;
+  return /^https?:\/\//i.test(chosen) ? chosen : `http://${chosen}`;
+}
+
+export function resolveWindowsSystemProxyUrl(): string | undefined {
+  if (process.platform !== "win32") return undefined;
+  const now = Date.now();
+  if (windowsProxyCache && now - windowsProxyCache.checkedAt < WINDOWS_PROXY_TTL_MS) {
+    return windowsProxyCache.url;
+  }
+  let resolved: string | undefined;
+  try {
+    const out = execFileSync(
+      "reg",
+      [
+        "query",
+        "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
+      ],
+      { encoding: "utf8", timeout: 500, windowsHide: true },
+    );
+    const enabled = /^\s*ProxyEnable\s+REG_DWORD\s+(?:0x0*1|1)\b/im.test(out);
+    if (enabled) {
+      const match = /^\s*ProxyServer\s+REG_SZ\s+(.+)$/im.exec(out);
+      if (match?.[1]) resolved = parseWindowsProxyServer(match[1]);
+    }
+  } catch {
+    resolved = undefined;
+  }
+  windowsProxyCache = { checkedAt: now, url: resolved };
+  return resolved;
+}
+
+export function getWindowsSystemProxyDispatcher(): ProxyAgent | undefined {
+  if (getGlobalDispatcher() instanceof MockAgent) return undefined;
+  const url = resolveWindowsSystemProxyUrl();
+  if (!url) return undefined;
+  if (!windowsProxyAgentCache || windowsProxyAgentCache.url !== url) {
+    windowsProxyAgentCache = { url, agent: new ProxyAgent(url) };
+  }
+  return windowsProxyAgentCache.agent;
+}
 
 function hasProxyConfiguration(): boolean {
   return ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"].some(
@@ -66,6 +131,12 @@ export async function antigravityFetch(
   input: string | URL,
   init: RequestInit = {},
 ): Promise<Response> {
+  if (!hasProxyConfiguration() && globalThis.fetch === NATIVE_FETCH) {
+    const winProxy = getWindowsSystemProxyDispatcher();
+    if (winProxy) {
+      return undiciFetch(input, { ...init, dispatcher: winProxy } as never) as unknown as Response;
+    }
+  }
   const dispatcher = await getDispatcher();
   if (!dispatcher) return fetch(input, init);
   return fetch(input, { ...init, dispatcher } as DispatcherInit);

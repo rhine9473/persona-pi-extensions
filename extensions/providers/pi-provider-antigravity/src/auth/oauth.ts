@@ -5,9 +5,11 @@ import {
   fetch as undiciFetch,
   getGlobalDispatcher,
   MockAgent,
+  type Dispatcher,
   type RequestInit as UndiciRequestInit,
 } from "undici";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
+import { getWindowsSystemProxyDispatcher } from "../utils/http.js";
 
 let proxyDispatcher: EnvHttpProxyAgent | undefined;
 let proxyDispatcherKey: string | undefined;
@@ -32,21 +34,22 @@ function unwrapFetchError(err: unknown): string {
   return parts.filter(Boolean).join(" -> ");
 }
 
-function getOAuthDispatcher(): EnvHttpProxyAgent | undefined {
+function getOAuthDispatcher(): Dispatcher | undefined {
   if (getGlobalDispatcher() instanceof MockAgent) return undefined;
-  const key = [
+  const httpVars = [
     process.env.HTTPS_PROXY,
     process.env.https_proxy,
     process.env.HTTP_PROXY,
     process.env.http_proxy,
-    process.env.ALL_PROXY,
-    process.env.all_proxy,
-    process.env.NO_PROXY,
-    process.env.no_proxy,
   ]
-    .map((v) => v ?? "")
-    .join("|");
-  if (!key.replace(/\|/g, "").trim()) return undefined;
+    .map((v) => v?.trim() ?? "")
+    .filter(Boolean);
+  const allProxy = (process.env.ALL_PROXY || process.env.all_proxy || "").trim();
+  const hasHttpEnvProxy = httpVars.length > 0 || /^https?:\/\//i.test(allProxy);
+  if (!hasHttpEnvProxy) {
+    return getWindowsSystemProxyDispatcher();
+  }
+  const key = [...httpVars, allProxy, process.env.NO_PROXY ?? "", process.env.no_proxy ?? ""].join("|");
   if (!proxyDispatcher || proxyDispatcherKey !== key) {
     proxyDispatcherKey = key;
     try {
@@ -55,7 +58,7 @@ function getOAuthDispatcher(): EnvHttpProxyAgent | undefined {
       proxyDispatcher = undefined;
     }
   }
-  return proxyDispatcher;
+  return proxyDispatcher ?? getWindowsSystemProxyDispatcher();
 }
 
 async function oauthFetch(url: string, init: UndiciRequestInit = {}) {
