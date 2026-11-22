@@ -13,6 +13,7 @@ import {
 // Namespace import: transcript helpers exist on pi-ai >= 0.86; resolved at runtime.
 import * as piAi from "@earendil-works/pi-ai";
 import {
+  clearAccountAuthFailure,
   failoverToNextAccount,
   parseResetDurationMs,
   poolDisplayName,
@@ -2506,6 +2507,7 @@ export function streamAntigravity(
         }
         if (received) {
           if (output.stopReason !== "error" && output.stopReason !== "aborted") {
+            clearAccountAuthFailure(creds.token);
             // Remember the live fallback route only after the SSE stream actually
             // succeeded (not merely on HTTP 200 headers).
             if (

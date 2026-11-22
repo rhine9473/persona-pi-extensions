@@ -15,6 +15,7 @@ export type { OAuthCredentials, OAuthLoginCallbacks } from "./oauth.js";
 export {
   activateAccount,
   apiKeyForAccount,
+  clearAccountAuthFailure,
   clearAccountCooldown,
   failoverToNextAccount,
   getAccountBySelector,

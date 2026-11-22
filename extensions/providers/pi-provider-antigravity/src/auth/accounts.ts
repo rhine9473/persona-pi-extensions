@@ -636,6 +636,22 @@ export function markAccountAuthFailure(
   notifyAccountsChanged();
 }
 
+export function clearAccountAuthFailure(selectorOrToken: string): void {
+  const store = loadAccountStore();
+  const resolvedId = findAccountId(store, selectorOrToken);
+  const acc =
+    store.accounts[selectorOrToken] ??
+    findAccountByToken(store, selectorOrToken) ??
+    (resolvedId ? store.accounts[resolvedId] : undefined);
+  if (!acc) return;
+  if ((acc.authStatus ?? "ready") === "ready" && !acc.authError && !acc.verifyUrl) return;
+  acc.authStatus = "ready";
+  delete acc.authError;
+  delete acc.verifyUrl;
+  saveAccountStore(store);
+  notifyAccountsChanged();
+}
+
 export function recordAccountAvailableModels(selectorOrToken: string, modelIds: string[]): void {
   const store = loadAccountStore();
   const resolvedId = findAccountId(store, selectorOrToken);
@@ -765,22 +781,19 @@ export async function selectAccountForRequest(
   }
 
   const authReady = enabled.filter((a) => (a.authStatus ?? "ready") === "ready");
-  if (authReady.length === 0) {
-    const verifyAcc = enabled.find((a) => a.authStatus === "needs_verify");
-    if (verifyAcc) {
-      const link = verifyAcc.verifyUrl ? `（验证链接：${verifyAcc.verifyUrl}）` : "";
-      return {
-        kind: "none_available",
-        reason: `账号需要 Google 浏览器验证后才能继续使用${link}；验证完成后运行 /agy 按 r 刷新即可恢复`,
-      };
-    }
+  // If every enabled account is stuck in `needs_verify` (e.g. user clicked the browser
+  // link to verify and now retries without manually running /agy -> r), allow probing
+  // them so a passing response auto-heals back to `ready`.
+  const verifyProbe = authReady.length === 0 ? enabled.filter((a) => a.authStatus === "needs_verify") : [];
+  const selectable = authReady.length > 0 ? authReady : verifyProbe;
+  if (selectable.length === 0) {
     return { kind: "none_available", reason: "没有可用的已授权账号，请重新登录" };
   }
 
-  const eligibleByModel = authReady.filter(
+  const eligibleByModel = selectable.filter(
     (a) => !a.availableModels || a.availableModels.includes(modelId),
   );
-  const candidatePool = eligibleByModel.length > 0 ? eligibleByModel : authReady;
+  const candidatePool = eligibleByModel.length > 0 ? eligibleByModel : selectable;
 
   const healthy = candidatePool.filter((a) => !isAccountCoolingForPool(a, pool, now));
   if (healthy.length === 0) {
