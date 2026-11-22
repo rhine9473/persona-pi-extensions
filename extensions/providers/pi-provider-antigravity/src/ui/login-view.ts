@@ -39,7 +39,10 @@ export function startInlineLogin(options: {
     submitting: false,
     input,
     cancel() {
-      if (settled) return;
+      if (settled) {
+        if (state.error) options.onCancel();
+        return;
+      }
       settled = true;
       state.active = false;
       controller.abort(new Error("已取消登录"));
@@ -92,7 +95,8 @@ export function startInlineLogin(options: {
 
       lines.push("");
       if (state.error) {
-        lines.push(`  ${theme.fg("error", g.err)}  ${theme.fg("error", truncateToWidth(state.error, Math.max(20, width - 8), "…"))}`);
+        lines.push(`  ${theme.fg("error", g.err)}  ${theme.fg("error", truncateToWidth(`失败原因：${state.error}`, Math.max(20, width - 8), "…"))}`);
+        lines.push(`     ${theme.fg("dim", "可按 Esc 返回控制台，或检查代理/网络后重试")}`);
       } else {
         lines.push(`  ${theme.fg("accent", spinnerFrame)}  ${theme.fg("text", state.submitting ? "正在换取访问令牌…" : "等待浏览器回调…")}`);
       }
@@ -155,10 +159,12 @@ export function startInlineLogin(options: {
       if (settled || controller.signal.aborted) return;
       settled = true;
       state.active = false;
+      state.submitting = false;
       const msg = error instanceof Error ? error.message : String(error);
       state.error = msg;
       options.onMessage(`登录失败：${msg}`, "error");
-      options.onCancel();
+      // Keep the inline login view open so the user can actually read the exact error before pressing Esc.
+      options.onUpdate();
     }
   })();
 

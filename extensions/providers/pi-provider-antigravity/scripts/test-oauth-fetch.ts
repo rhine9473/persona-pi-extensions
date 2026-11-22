@@ -48,6 +48,13 @@ try {
     });
   await assert.rejects(refreshAntigravityToken(credentials), /invalid_grant/);
   mock.assertNoPendingInterceptors();
+
+  // Verify nested transport error causes are preserved instead of opaque "fetch failed".
+  mock
+    .get("https://oauth2.googleapis.com")
+    .intercept({ path: "/token", method: "POST" })
+    .replyWithError(Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:7890"), { code: "ECONNREFUSED" }));
+  await assert.rejects(refreshAntigravityToken(credentials), /ECONNREFUSED/);
 } finally {
   globalThis.fetch = originalFetch;
   setGlobalDispatcher(originalDispatcher);

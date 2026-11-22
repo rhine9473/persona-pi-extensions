@@ -12,6 +12,26 @@ import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-a
 let proxyDispatcher: EnvHttpProxyAgent | undefined;
 let proxyDispatcherKey: string | undefined;
 
+function unwrapFetchError(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const parts = [err.message];
+  let cur: unknown = (err as { cause?: unknown }).cause;
+  let depth = 0;
+  while (cur && depth < 3) {
+    depth++;
+    if (cur instanceof Error) {
+      const code = (cur as { code?: unknown }).code;
+      const piece = typeof code === "string" && code ? `${code}: ${cur.message}` : cur.message;
+      if (piece && !parts.includes(piece)) parts.push(piece);
+      cur = (cur as { cause?: unknown }).cause;
+    } else {
+      parts.push(String(cur));
+      break;
+    }
+  }
+  return parts.filter(Boolean).join(" -> ");
+}
+
 function getOAuthDispatcher(): EnvHttpProxyAgent | undefined {
   if (getGlobalDispatcher() instanceof MockAgent) return undefined;
   const key = [
@@ -29,14 +49,32 @@ function getOAuthDispatcher(): EnvHttpProxyAgent | undefined {
   if (!key.replace(/\|/g, "").trim()) return undefined;
   if (!proxyDispatcher || proxyDispatcherKey !== key) {
     proxyDispatcherKey = key;
-    proxyDispatcher = new EnvHttpProxyAgent();
+    try {
+      proxyDispatcher = new EnvHttpProxyAgent();
+    } catch {
+      proxyDispatcher = undefined;
+    }
   }
   return proxyDispatcher;
 }
 
-function oauthFetch(url: string, init: UndiciRequestInit = {}) {
+async function oauthFetch(url: string, init: UndiciRequestInit = {}) {
   const dispatcher = getOAuthDispatcher();
-  return dispatcher ? undiciFetch(url, { ...init, dispatcher }) : undiciFetch(url, init);
+  try {
+    return await (dispatcher ? undiciFetch(url, { ...init, dispatcher }) : undiciFetch(url, init));
+  } catch (err) {
+    if (init.signal?.aborted) throw err;
+    // Host Pi runtime may configure a proxy or system CA dispatcher on globalThis.fetch
+    // (or in a separate undici instance) that our local undiciFetch doesn't share.
+    if (typeof globalThis.fetch === "function" && !(getGlobalDispatcher() instanceof MockAgent)) {
+      try {
+        return await globalThis.fetch(url, init as RequestInit);
+      } catch (fallbackErr) {
+        throw new Error(unwrapFetchError(fallbackErr), { cause: fallbackErr });
+      }
+    }
+    throw new Error(unwrapFetchError(err), { cause: err });
+  }
 }
 import { defaultProjectId, loadCodeAssist } from "../client/client.js";
 import { escapeHtml, antigravityEnv } from "../utils/util.js";
