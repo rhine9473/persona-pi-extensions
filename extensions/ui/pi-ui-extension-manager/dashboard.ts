@@ -189,7 +189,7 @@ export class ManagerDashboard implements Component, Focusable {
       label: `[${this.status(row)}] ${row.name} · ${row.type === 'resource' && row.packageName ? row.packageName : kindLabels[row.kind] ?? row.kind}`,
     })), grouped ? rows.length : Math.max(1, height - (rows.length > height ? 1 : 0)), {
       selectedPrefix: (text) => this.theme.fg('accent', text),
-      selectedText: (text) => this.theme.bg('selectedBg', this.theme.fg('accent', this.theme.bold(truncateToWidth(text, width, '…', true)))),
+      selectedText: (text) => this.theme.fg('accent', this.theme.bold(truncateToWidth(text, width, '…', true))),
       description: (text) => this.theme.fg('muted', text),
       scrollInfo: (text) => this.theme.fg('dim', text),
       noMatch: (text) => this.theme.fg('warning', text),

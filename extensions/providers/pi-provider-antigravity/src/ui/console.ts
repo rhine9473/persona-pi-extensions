@@ -532,11 +532,13 @@ export class AntigravityConsole implements Component, Focusable {
             : this.theme.fg("muted", padRight(` ${globalIdx + 1}`, orderW));
 
         const emailTxt = padRight(maskEmailAddress(acc.email, this.settings.maskEmails), emailW);
-        const emailStyled = !acc.enabled
-          ? this.theme.fg("dim", emailTxt)
-          : selected
-            ? this.theme.bold(this.theme.fg("text", emailTxt))
-            : this.theme.fg("text", emailTxt);
+        const emailStyled = deleting
+          ? this.theme.bold(this.theme.fg("error", emailTxt))
+          : !acc.enabled
+            ? this.theme.fg("dim", emailTxt)
+            : selected
+              ? this.theme.bold(this.theme.fg("accent", emailTxt))
+              : this.theme.fg("text", emailTxt);
 
         const badge = tierBadge(acc.planLabel);
         const badgePadded = padRight(badge.label, tierW);
@@ -564,16 +566,13 @@ export class AntigravityConsole implements Component, Focusable {
           ? `  ${this.theme.fg(acc.cachedUsage?.credits ? "text" : "dim", padLeft(crVal, creditsW))}`
           : "";
 
-        const lead = selected ? this.theme.fg("accent", `${g.cursor} `) : "  ";
+        const lead = deleting
+          ? this.theme.fg("error", `${g.err} `)
+          : selected
+            ? this.theme.fg("accent", `${g.cursor} `)
+            : "  ";
         const rawRow = `${lead}${orderTxt}  ${emailStyled}  ${badgeStyled}  ${stStyled}  ${rotStyled}  ${gCell}  ${cCell}${crCell}`;
-        const padded = padRight(rawRow, innerWidth);
-        lines.push(
-          deleting
-            ? this.theme.bg("toolErrorBg", padded)
-            : selected
-              ? this.theme.bg("selectedBg", padded)
-              : padded,
-        );
+        lines.push(padRight(rawRow, innerWidth));
       }
     } else if (innerWidth >= 60) {
       // Compact 2-line card mode (60-89)
@@ -589,18 +588,26 @@ export class AntigravityConsole implements Component, Focusable {
         const loading = this.refreshingIds.has(acc.accountId) ? spinnerFrame : undefined;
         const badge = tierBadge(acc.planLabel);
         const st = accountStatusText(acc, now);
-        const prefix = selected ? this.theme.fg("accent", `${g.cursor}`) : " ";
+        const prefix = deleting
+          ? this.theme.fg("error", g.err)
+          : selected
+            ? this.theme.fg("accent", g.cursor)
+            : " ";
         const ord = acc.order === 0 ? this.theme.fg("accent", `${g.primary}1`) : this.theme.fg("muted", ` ${globalIdx + 1}`);
         const email = padRight(maskEmailAddress(acc.email, this.settings.maskEmails), Math.max(16, innerWidth - 26));
+        const emailCell = deleting
+          ? this.theme.bold(this.theme.fg("error", email))
+          : selected
+            ? this.theme.bold(this.theme.fg("accent", email))
+            : this.theme.fg(acc.enabled ? "text" : "dim", email);
         const r1 = padRight(
-          `${prefix}${ord} ${this.theme.fg(acc.enabled ? "text" : "dim", email)}  ${this.theme.fg(badge.kind === "ultra" ? "accent" : "muted", padRight(badge.label, 5))}  ${this.theme.fg(st.color, padRight(`${g[st.glyphKey]} ${st.text}`, 9))}`,
+          `${prefix}${ord} ${emailCell}  ${this.theme.fg(badge.kind === "ultra" ? "accent" : "muted", padRight(badge.label, 5))}  ${this.theme.fg(st.color, padRight(`${g[st.glyphKey]} ${st.text}`, 9))}`,
           innerWidth,
         );
         const gCell = renderPoolCell(this.theme, g, acc, "gemini", 6, compactPoolW, loading, now);
         const cCell = renderPoolCell(this.theme, g, acc, "claude_gpt", 6, compactPoolW, loading, now);
         const r2 = padRight(`     ${this.theme.fg("muted", "G")} ${gCell}  ${this.theme.fg("muted", "C")} ${cCell}`, innerWidth);
-        lines.push(deleting ? this.theme.bg("toolErrorBg", r1) : selected ? this.theme.bg("selectedBg", r1) : r1);
-        lines.push(deleting ? this.theme.bg("toolErrorBg", r2) : selected ? this.theme.bg("selectedBg", r2) : r2);
+        lines.push(r1, r2);
       }
     } else {
       // Minimal 1-line mode (<60)
@@ -612,15 +619,26 @@ export class AntigravityConsole implements Component, Focusable {
         const acc = visible[i]!;
         const globalIdx = start + i;
         const selected = globalIdx === this.selectedAccountIdx;
+        const deleting = this.confirmDeleteId === acc.accountId;
         const st = accountStatusText(acc, now);
         const name = padRight(shortEmail(acc.email, this.settings.maskEmails), Math.max(8, innerWidth - 33));
         const gC = renderPoolCell(this.theme, g, acc, "gemini", 0, miniPoolW, undefined, now);
         const cC = renderPoolCell(this.theme, g, acc, "claude_gpt", 0, miniPoolW, undefined, now);
+        const lead = deleting
+          ? this.theme.fg("error", g.err)
+          : selected
+            ? this.theme.fg("accent", g.cursor)
+            : " ";
+        const nameCell = deleting
+          ? this.theme.bold(this.theme.fg("error", name))
+          : selected
+            ? this.theme.bold(this.theme.fg("accent", name))
+            : this.theme.fg(acc.enabled ? "text" : "dim", name);
         const row = padRight(
-          `${selected ? this.theme.fg("accent", g.cursor) : " "}${this.theme.fg(st.color, g[st.glyphKey])} ${this.theme.fg(acc.enabled ? "text" : "dim", name)} ${this.theme.fg("dim", "G")}${gC} ${this.theme.fg("dim", "C")}${cC}`,
+          `${lead}${this.theme.fg(st.color, g[st.glyphKey])} ${nameCell} ${this.theme.fg("dim", "G")}${gC} ${this.theme.fg("dim", "C")}${cC}`,
           innerWidth,
         );
-        lines.push(selected ? this.theme.bg("selectedBg", row) : row);
+        lines.push(row);
       }
     }
 
@@ -842,10 +860,10 @@ export class AntigravityConsole implements Component, Focusable {
       const mark = isActive ? this.theme.fg("success", `${g.check} `) : "  ";
       const lead = selected ? this.theme.fg("accent", g.cursor) : " ";
       const fullRow = padRight(
-        `${lead} ${mark}${selected ? this.theme.bold(this.theme.fg("text", nameStr)) : this.theme.fg("text", nameStr)} ${this.theme.fg("muted", ctxStr)}  ${pills}`,
+        `${lead} ${mark}${selected ? this.theme.bold(this.theme.fg("accent", nameStr)) : this.theme.fg("text", nameStr)} ${this.theme.fg("muted", ctxStr)}  ${pills}`,
         innerWidth,
       );
-      lines.push(selected ? this.theme.bg("selectedBg", fullRow) : fullRow);
+      lines.push(fullRow);
     }
 
     if (showDetail) {
@@ -1035,24 +1053,29 @@ export class AntigravityConsole implements Component, Focusable {
                 ? this.theme.fg("error", g.err)
                 : this.theme.fg("dim", g.offDot);
         const hint = r.actionHint ? this.theme.fg("accent", r.actionHint) : "";
-        const left = `${lead} ${icon}  ${this.theme.fg("muted", padRight(r.label, 14))} ${this.theme.fg("text", r.value)}`;
+        const labelStyled = this.theme.fg(selected ? "accent" : "muted", padRight(r.label, 14));
+        const valueStyled = selected ? this.theme.bold(this.theme.fg("text", r.value)) : this.theme.fg("text", r.value);
+        const left = `${lead} ${icon}  ${labelStyled} ${valueStyled}`;
         const gap = Math.max(1, innerWidth - visibleWidth(left) - visibleWidth(hint) - 1);
-        const line = padRight(`${left}${" ".repeat(gap)}${hint}`, innerWidth);
-        lines.push(selected ? this.theme.bg("selectedBg", line) : line);
+        lines.push(padRight(`${left}${" ".repeat(gap)}${hint}`, innerWidth));
       } else if (r.section === "setting") {
         const valColor = r.locked ? "dim" : selected ? "accent" : "text";
         const noteStr = r.note ? this.theme.fg("dim", r.note) : "";
-        const line = padRight(
-          `${lead}  ${this.theme.fg("muted", padRight(r.label, 14))} ${this.theme.fg(valColor, padRight(r.value, 20))}  ${noteStr}`,
-          innerWidth,
-        );
-        lines.push(selected ? this.theme.bg("selectedBg", line) : line);
+        const labelStyled = this.theme.fg(selected ? "accent" : "muted", padRight(r.label, 14));
+        const valueStyled = selected && !r.locked
+          ? this.theme.bold(this.theme.fg(valColor, padRight(r.value, 20)))
+          : this.theme.fg(valColor, padRight(r.value, 20));
+        lines.push(padRight(`${lead}  ${labelStyled} ${valueStyled}  ${noteStr}`, innerWidth));
       } else {
-        const line = padRight(
-          `${lead}  ${this.theme.fg("dim", padRight(r.label, 7))} ${this.theme.fg("text", padRight(r.value, 24))} ${this.theme.fg("dim", r.note ?? "")}`,
-          innerWidth,
+        const valueStyled = selected
+          ? this.theme.bold(this.theme.fg("accent", padRight(r.value, 24)))
+          : this.theme.fg("text", padRight(r.value, 24));
+        lines.push(
+          padRight(
+            `${lead}  ${this.theme.fg("dim", padRight(r.label, 7))} ${valueStyled} ${this.theme.fg("dim", r.note ?? "")}`,
+            innerWidth,
+          ),
         );
-        lines.push(selected ? this.theme.bg("selectedBg", line) : line);
       }
     }
 

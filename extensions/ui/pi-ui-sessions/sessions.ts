@@ -94,7 +94,7 @@ export function formatRelativeTime(
         : `${date.getFullYear()}-${pad(date.getMonth() + 1)}`;
     const compact = `${dateStr} ${relative}`;
     if (compact.length <= maxWidth) return compact;
-    const shorter = `${dateStr} ${relative.replace(/ ago$/u, "").replace("just now", "now")}`;
+    const shorter = `${dateStr} ${relative.replace(/前$/u, "").replace("刚刚", "刚才")}`;
     if (shorter.length <= maxWidth) return shorter;
     return dateStr.length <= maxWidth ? dateStr : "";
   };
@@ -103,9 +103,9 @@ export function formatRelativeTime(
   // This avoids midnight flips showing "0d ago" or cross-year jumps in early January
   if (diffHour < 24) {
     const time = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
-    if (diffSec < 60) return fitWidth(`${time} (just now)`);
-    if (diffMin < 60) return fitWidth(`${time} (${diffMin}m ago)`);
-    return fitWidth(`${time} (${diffHour}h ago)`);
+    if (diffSec < 60) return fitWidth(`${time} (刚刚)`);
+    if (diffMin < 60) return fitWidth(`${time} (${diffMin}分钟前)`);
+    return fitWidth(`${time} (${diffHour}小时前)`);
   }
 
   // Older than 24 hours: display calendar date and day/month/year distance
@@ -113,16 +113,16 @@ export function formatRelativeTime(
   if (diffDay < 365) {
     const dateStr = `${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
     if (diffDay < 60) {
-      return fitWidth(`${dateStr} (${diffDay}d ago)`);
+      return fitWidth(`${dateStr} (${diffDay}天前)`);
     }
     const months = Math.max(1, Math.floor(diffDay / 30));
-    return fitWidth(`${dateStr} (${months}mo ago)`);
+    return fitWidth(`${dateStr} (${months}个月前)`);
   }
 
   // Cross-year older than 365 days
   const years = Math.max(1, Math.floor(diffDay / 365));
   const dateStr = `${date.getFullYear()}-${pad(date.getMonth() + 1)}`;
-  return fitWidth(`${dateStr} (${years}y ago)`);
+  return fitWidth(`${dateStr} (${years}年前)`);
 }
 
 const cleanDisplayLine = (text: string) =>
@@ -137,7 +137,7 @@ export function buildSessionLabel(session: SessionInfoLike): string {
 
 const normalizeSnippet = (text: string, maxLength: number): string => {
   const cleaned = cleanDisplayLine(text);
-  const fallback = cleaned.length > 0 ? cleaned : "No messages";
+  const fallback = cleaned.length > 0 ? cleaned : "暂无消息";
   if (maxLength < 1) return "";
   // Bound on code points so a truncation boundary cannot split a surrogate pair
   // into a lone surrogate in the session list.
@@ -386,7 +386,7 @@ function messageToBlocks(message: PreviewMessageLike): PreviewBlock[] {
           {
             kind: "summary",
             label:
-              message.role === "branchSummary" ? "Branch summary" : "Summary",
+              message.role === "branchSummary" ? "分支摘要" : "摘要",
             text,
           },
         ]
@@ -400,7 +400,7 @@ function messageToBlocks(message: PreviewMessageLike): PreviewBlock[] {
     ? [
         {
           kind: "custom",
-          label: cleanDisplayLine(message.role) || "Message",
+          label: cleanDisplayLine(message.role) || "消息",
           text,
         },
       ]
@@ -429,13 +429,13 @@ export function buildSessionPreview(
   if (omitted > 0) {
     blocks.push({
       kind: "notice",
-      text: `… ${omitted} earlier messages omitted`,
+      text: `… 已省略更早的 ${omitted} 条消息`,
     });
   }
   if ((options.truncatedBytes ?? 0) > 0) {
     blocks.push({
       kind: "notice",
-      text: `… ${options.truncatedBytes} bytes of preview content omitted`,
+      text: `… 已省略 ${options.truncatedBytes} 字节预览内容`,
     });
   }
 
@@ -446,11 +446,11 @@ export function buildSessionPreview(
   const messageCount = session.messageCount ?? totalMessages;
   return {
     title: buildSessionLabel(session),
-    subtitle: `${formatTimestamp(session.modified)} · ${messageCount} messages · ${cleanDisplayLine(session.cwd)}`,
+    subtitle: `${formatTimestamp(session.modified)} · ${messageCount} 条消息 · ${cleanDisplayLine(session.cwd)}`,
     blocks:
       blocks.length > 0
         ? blocks
-        : [{ kind: "notice", text: "No previewable messages." }],
+        : [{ kind: "notice", text: "暂无可预览消息" }],
   };
 }
 
@@ -463,8 +463,8 @@ export function buildPreviewError(
   );
   return {
     title: buildSessionLabel(session),
-    subtitle: `${formatTimestamp(session.modified)} · preview unavailable`,
-    blocks: [{ kind: "notice", text: `Failed to load preview: ${message}` }],
+    subtitle: `${formatTimestamp(session.modified)} · 预览不可用`,
+    blocks: [{ kind: "notice", text: `加载预览失败：${message}` }],
     error: message,
   };
 }

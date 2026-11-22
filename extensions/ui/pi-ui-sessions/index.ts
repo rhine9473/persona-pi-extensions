@@ -4,20 +4,13 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
-import {
-  DynamicBorder,
-  keyHint,
-  SessionManager,
-} from "@earendil-works/pi-coding-agent";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import {
   CancellableLoader,
-  Container,
   Key,
   matchesKey,
   type SelectItem,
   SelectList,
-  Spacer,
-  Text,
   truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
@@ -492,16 +485,11 @@ async function listSessions(
   let loadError: string | undefined;
   const sessions = await ctx.ui.custom<SessionInfoLike[] | null>(
     (tui, theme, _kb, done) => {
-      const container = new Container();
-      // Same tone as the split-pane frame and every other OpenPI panel; this
-      // was the last `border` call left in the package.
-      const borderColor = (text: string) => theme.fg("borderMuted", text);
-
       const loader = new CancellableLoader(
         tui,
         (text) => theme.fg("accent", text),
         (text) => theme.fg("muted", text),
-        "Loading sessions...",
+        "正在加载会话…",
       );
 
       let settled = false;
@@ -513,15 +501,6 @@ async function listSessions(
 
       loader.onAbort = () => finish(null);
 
-      container.addChild(new DynamicBorder(borderColor));
-      container.addChild(loader);
-      container.addChild(new Spacer(1));
-      container.addChild(
-        new Text(keyHint("tui.select.cancel", "cancel"), 1, 0),
-      );
-      container.addChild(new Spacer(1));
-      container.addChild(new DynamicBorder(borderColor));
-
       const load = async () => {
         try {
           const results = await SessionManager.list(
@@ -529,14 +508,14 @@ async function listSessions(
             undefined,
             (loaded, total) => {
               if (total > 0) {
-                loader.setMessage(`Loading sessions (${loaded}/${total})...`);
+                loader.setMessage(`正在加载会话 (${loaded}/${total})…`);
               }
             },
           );
           const filtered = results.filter((s) => !isSubagentSession(s));
           finish(sortSessions(filtered));
         } catch (error) {
-          loadError = error instanceof Error ? error.message : "Unknown error";
+          loadError = error instanceof Error ? error.message : "未知错误";
           finish(null);
         }
       };
@@ -544,8 +523,30 @@ async function listSessions(
       void load();
 
       return {
-        render: (width) => container.render(width),
-        invalidate: () => container.invalidate(),
+        render: (width) => {
+          const boxWidth = Math.min(72, Math.max(28, width));
+          const innerWidth = Math.max(26, boxWidth - 2);
+          const leftPad = width > boxWidth ? " ".repeat(Math.floor((width - boxWidth) / 2)) : "";
+          const titlePart = " 会话 ";
+          const fill = Math.max(1, innerWidth - visibleWidth(titlePart) - 1);
+          const top =
+            theme.fg("border", "╭─") +
+            theme.bold(theme.fg("accent", titlePart)) +
+            theme.fg("border", `${"─".repeat(fill)}╮`);
+          const side = theme.fg("border", "│");
+          const bottom = theme.fg("border", `╰${"─".repeat(innerWidth)}╯`);
+          const bodyLines = [
+            ...loader.render(innerWidth),
+            "",
+            theme.fg("dim", " Esc 取消"),
+          ];
+          return [
+            top,
+            ...bodyLines.map((l) => `${side}${padAnsiRight(l, innerWidth)}${side}`),
+            bottom,
+          ].map((line) => truncateToWidth(`${leftPad}${line}`, Math.max(1, width), ""));
+        },
+        invalidate: () => loader.invalidate(),
         handleInput: (data) => {
           loader.handleInput(data);
           tui.requestRender();
@@ -555,7 +556,7 @@ async function listSessions(
   );
 
   if (loadError) {
-    ctx.ui.notify(`Failed to load sessions: ${loadError}`, "error");
+    ctx.ui.notify(`加载会话失败：${loadError}`, "error");
   }
 
   return sessions;
@@ -683,7 +684,7 @@ async function showSessionPicker(
         } catch (error) {
           if (disposed || loadSeq !== workspaceLoadSeq) return;
           ctx.ui.notify(
-            `Failed to load sessions: ${error instanceof Error ? error.message : error}`,
+            `加载会话失败：${error instanceof Error ? error.message : error}`,
             "error",
           );
         } finally {
@@ -705,8 +706,8 @@ async function showSessionPicker(
 
         activePreview = {
           title: buildSessionLabel(session),
-          subtitle: `${session.modified.toLocaleString()} · loading preview`,
-          blocks: [{ kind: "notice", text: "Loading selected session…" }],
+          subtitle: `${session.modified.toLocaleString()} · 正在加载预览`,
+          blocks: [{ kind: "notice", text: "正在加载选中会话…" }],
         };
 
         const seq = previewSeq;
@@ -766,7 +767,7 @@ async function showSessionPicker(
           return {
             value: entry.session.path,
             label: isDeleting
-              ? theme.fg("error", theme.bold("[Delete?] ")) + label
+              ? theme.fg("error", theme.bold("[待删] ")) + label
               : label,
           };
         });
@@ -829,7 +830,7 @@ async function showSessionPicker(
                 ["Ctrl+D", "删除"],
               ],
           leftBudget,
-          confirmingDeletePath ? "确认删除选中会话？ (Enter/y 确认 · Esc/n 取消)" : undefined,
+          confirmingDeletePath ? "确认删除选中会话 (Enter/y 确认 · Esc/n 取消)" : undefined,
         );
         const gap = Math.max(1, innerWidth - visibleWidth(left) - visibleWidth(rightMeta));
         return padAnsiRight(`${left}${" ".repeat(gap)}${rightMeta}`, innerWidth);
@@ -1051,10 +1052,10 @@ async function showSessionPicker(
                   sessionByPath.delete(targetPath);
                   rebuild();
                   schedulePreviewLoad();
-                  ctx.ui.notify("Session deleted.", "info");
+                  ctx.ui.notify("已删除会话", "info");
                 } catch (e) {
                   const msg = e instanceof Error ? e.message : String(e);
-                  ctx.ui.notify(`Failed to delete session: ${msg}`, "error");
+                  ctx.ui.notify(`删除会话失败：${msg}`, "error");
                 }
                 tui.requestRender();
               })();
@@ -1182,7 +1183,7 @@ async function showSessionPicker(
               if (!selectedPath) return;
               const currentSessionFile = ctx.sessionManager.getSessionFile?.();
               if (currentSessionFile && selectedPath === currentSessionFile) {
-                ctx.ui.notify("Cannot delete the currently active session.", "warning");
+                ctx.ui.notify("无法删除当前正在使用的会话", "warning");
                 return;
               }
               confirmingDeletePath = selectedPath;
@@ -1257,9 +1258,9 @@ async function runSessionsCommand(
 
   if (!sessions || sessions.length === 0) {
     if (ctx.hasUI) {
-      ctx.ui.notify("No sessions found for this project.", "info");
+      ctx.ui.notify("当前工作区暂无会话", "info");
     } else {
-      console.log("No sessions found for this project.");
+      console.log("当前工作区暂无会话");
     }
     return;
   }
@@ -1276,13 +1277,13 @@ async function runSessionsCommand(
 
   const result = await ctx.switchSession(selection.path);
   if (result.cancelled) {
-    ctx.ui.notify("Session switch cancelled.", "info");
+    ctx.ui.notify("已取消切换会话", "info");
   }
 }
 
 export default function sessionsExtension(pi: ExtensionAPI) {
   pi.registerCommand("sessions", {
-    description: "Pick a session from the current project",
+    description: "选择当前工作区的历史会话",
     handler: async (args, ctx) => {
       await runSessionsCommand(args, ctx);
     },
