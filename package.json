@@ -25,7 +25,7 @@
       "./extensions/providers/pi-provider-antigravity/src/index.ts"
     ],
     "skills": [
-      "./skills/subagents"
+      "./extensions/tools/pi-tool-subagents/skills/subagents"
     ]
   },
   "dependencies": {

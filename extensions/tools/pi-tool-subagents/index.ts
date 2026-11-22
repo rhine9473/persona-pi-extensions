@@ -17,7 +17,7 @@
  *
  * Agent types (`src/agent-types.ts`) are optional named presets that fix a
  * child's system prompt, model, and tool allowlist; see
- * `skills/subagents/REFERENCE.md`.
+ * `skills/subagents/REFERENCE.md` inside this extension folder.
  *
  * Architecture: Effect v4 generators throughout (backend -> manager ->
  * runtime); this file is the async boundary where tool handlers run effects

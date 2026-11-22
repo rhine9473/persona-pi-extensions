@@ -333,15 +333,16 @@ export function resolveOrchestrationSkillDirsOrThrow(
 ): string[] {
   const dirs: string[] = [];
   for (const name of CHILD_DISABLED_OPENPI_SKILL_DIRS) {
-    try {
-      dirs.push(
-        resolve(
-          fileURLToPath(new URL(`../skills/${name}`, import.meta.url)),
-        ),
-      );
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-      throw error;
+    for (const rel of [
+      `../extensions/tools/pi-tool-subagents/skills/${name}`,
+      `../skills/${name}`,
+    ]) {
+      try {
+        dirs.push(resolve(fileURLToPath(new URL(rel, import.meta.url))));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw error;
+      }
     }
   }
   return dirs;

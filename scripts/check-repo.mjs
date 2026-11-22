@@ -66,8 +66,11 @@ const { OPENPI_OWNER_SOURCE_PATHS } = await import(
 );
 const skillDirs = resolveOrchestrationSkillDirsOrThrow();
 assert.ok(
-  skillDirs.some((dir) => dir.endsWith(`${path.sep}skills${path.sep}subagents`) || dir.endsWith("/skills/subagents")),
-  `expected skills/subagents in ${JSON.stringify(skillDirs)}`,
+  skillDirs.some((dir) =>
+    dir.endsWith(`${path.sep}pi-tool-subagents${path.sep}skills${path.sep}subagents`) ||
+    dir.endsWith("/pi-tool-subagents/skills/subagents"),
+  ),
+  `expected pi-tool-subagents/skills/subagents in ${JSON.stringify(skillDirs)}`,
 );
 assert.ok(existsSync(OPENPI_OWNER_SOURCE_PATHS.subagents), "subagents source path must exist");
 
