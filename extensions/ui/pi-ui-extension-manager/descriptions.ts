@@ -115,7 +115,7 @@ export function resourceDescription(resource, agentDir) {
     if (match && openpi[match[1]]) return openpi[match[1]];
   }
   if (
-    /^(?:git:github\.com\/|https:\/\/github\.com\/)rhine9473\/persona-pi-extensions(?:\.git)?(?:@[^\s]+)?$/i.test(
+    /^(?:git:github\.com\/|https:\/\/github\.com\/)rhine9473\/(?:rhine|persona)-pi-extensions(?:\.git)?(?:@[^\s]+)?$/i.test(
       resource.metadata.source,
     )
   ) {

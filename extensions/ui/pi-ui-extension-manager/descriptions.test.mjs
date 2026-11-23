@@ -42,11 +42,11 @@ test('known OpenPI description is specific to repository and entry; other packag
   assert.equal(resourceDescription(f.resource(file, { ...metadata, source: 'git:github.com/other/tools' }), f.agent), '另一个包自己的功能。');
 });
 
-test('all persona-pi-extensions entries in package.json have non-empty descriptions', (t) => {
+test('all rhine-pi-extensions entries in package.json have non-empty descriptions', (t) => {
   const f = fixture(t);
   const repoRoot = path.resolve(import.meta.dirname, '../../..');
   const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8'));
-  const metadata = { origin: 'package', source: 'git:github.com/rhine9473/persona-pi-extensions', packageRoot: repoRoot };
+  const metadata = { origin: 'package', source: 'git:github.com/rhine9473/rhine-pi-extensions', packageRoot: repoRoot };
   for (const entry of pkg.pi.extensions) {
     const abs = path.resolve(repoRoot, entry);
     const resolved = fs.existsSync(abs) && fs.statSync(abs).isDirectory() ? path.join(abs, 'index.ts') : abs;

@@ -58,7 +58,7 @@ test("renders translucent rounded card with CJK alignment, OSC 133 zones, and ze
   installUserCard(() => themeMod.theme);
 
   const longMixed =
-    "发送框现在是整条深蓝色背景，在 Windows Terminal 的 acrylic 透明效果下非常突兀，和我们 persona-pi-extensions 里 tool-fold 的半透明 1px 圆角卡片风格完全不搭。能不能改成同样的细线圆角样式？";
+    "发送框现在是整条深蓝色背景，在 Windows Terminal 的 acrylic 透明效果下非常突兀，和我们 rhine-pi-extensions 里 tool-fold 的半透明 1px 圆角卡片风格完全不搭。能不能改成同样的细线圆角样式？";
 
   for (const text of [shortText, longMixed]) {
     for (const width of [60, 100]) {

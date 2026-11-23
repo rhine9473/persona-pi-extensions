@@ -1,7 +1,7 @@
 {
-  "name": "persona-pi-extensions",
+  "name": "rhine-pi-extensions",
   "version": "1.0.0",
-  "description": "Rhine 的个人 Pi 扩展套件：含 Antigravity 通道、子代理工具与透明圆角 TUI 体验。",
+  "description": "Pi Coding Agent 增强扩展套件：半透明圆角 TUI 美化、独立子代理与 Antigravity 多账号通道。",
   "license": "MIT",
   "keywords": [
     "pi-package"

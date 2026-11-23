@@ -208,7 +208,7 @@ test("shows spinner while running, marks aborted without checkmark, and prefers 
   // Error result skips banner stdout and surfaces real error line inside the box
   c2.updateResult(
     {
-      content: [{ type: "text", text: "> persona-pi-extensions@1.0.0 test\nError: Command exited with code 1" }],
+      content: [{ type: "text", text: "> rhine-pi-extensions@1.0.0 test\nError: Command exited with code 1" }],
       isError: true,
       durationMs: 500,
     },
@@ -250,7 +250,7 @@ test("folds restored historical sessions, keeps long path tail, and passes HTML 
   const c1 = new ToolExecutionComponent(
     "bash",
     "h-1",
-    { command: 'cd "C:/Users/Lenovo/.pi/agent/git/github.com/rhine9473/persona-pi-extensions" && npm test && git push origin main' },
+    { command: 'cd "C:/Users/Lenovo/.pi/agent/git/github.com/rhine9473/rhine-pi-extensions" && npm test && git push origin main' },
     {},
     h.wrap("bash", undefined),
     ui,
