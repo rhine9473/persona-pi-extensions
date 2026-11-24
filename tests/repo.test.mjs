@@ -54,9 +54,7 @@ test("all relative imports across extensions/ and shared/ resolve on disk", () =
 
 test("shared orchestration skill and owner source paths exist", async () => {
   await import(
-    pathToFileURL(
-      path.join(repoRoot, "extensions/providers/pi-provider-antigravity/scripts/register-ts.mjs"),
-    ).href
+    pathToFileURL(path.join(repoRoot, "scripts/register-ts.mjs")).href
   );
   const { resolveOrchestrationSkillDirsOrThrow } = await import(
     pathToFileURL(path.join(repoRoot, "shared/child-session.ts")).href

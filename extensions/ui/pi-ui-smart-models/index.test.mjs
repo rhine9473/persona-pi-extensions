@@ -9,9 +9,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../../..");
 
 await import(
-  pathToFileURL(
-    path.join(repoRoot, "extensions/providers/pi-provider-antigravity/scripts/register-ts.mjs"),
-  ).href
+  pathToFileURL(path.join(repoRoot, "scripts/register-ts.mjs")).href
 );
 
 test("smart-models groups by upstream, cleans names, and remembers thinking levels per model", async (t) => {

@@ -54,7 +54,7 @@ const persona = {
   'extensions/ui/pi-ui-image-paste/index.ts': '优化图片粘贴与附件提示，把临时图片路径显示为简洁占位，并方便查看和管理附件。',
   'extensions/tools/pi-tool-subagents/index.ts': '通过 /subagents、/btw 和后台子代理工具并发分派独立任务，支持进度追踪与结果自动回传。',
   'extensions/tools/pi-tool-bash-timeout/index.ts': '为非交互/子代理会话里未指定超时的 Bash 命令设置 120 秒上限，防止任务无限挂死。',
-  'extensions/providers/pi-provider-antigravity/src/index.ts': '接入 Google Antigravity OAuth 模型通道，提供 /agy 控制台、5h/7d 额度看板与多账号智能切换。',
+  'extensions/providers/pi-provider-stravia/index.ts': '通过本地 Stravia 网关接入 Antigravity 等上游模型，自动清洗 Pi 系统提示词指纹以减少 429 误拦截。',
 };
 
 function readHead(file) {

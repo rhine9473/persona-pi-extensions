@@ -38,6 +38,7 @@ const SOURCE_NAMES: Record<string, string> = {
   autoclaw: "AutoClaw",
   "autoclaw-cn": "AutoClaw 国内",
   antigravity: "Antigravity",
+  stravia: "Stravia",
   "google-antigravity": "Google Antigravity",
   "google-vertex": "Google Vertex AI",
   "gemini-cli": "Gemini CLI",

@@ -1,14 +1,14 @@
 {
   "name": "rhine-pi-extensions",
   "version": "1.0.0",
-  "description": "Pi Coding Agent 增强扩展套件：半透明圆角 TUI 美化、独立子代理与 Antigravity 多账号通道。",
+  "description": "Pi Coding Agent 增强扩展套件：半透明圆角 TUI 美化、独立子代理与 Stravia 网关通道。",
   "license": "MIT",
   "keywords": [
     "pi-package"
   ],
   "type": "module",
   "scripts": {
-    "test": "node --test tests/*.test.mjs extensions/ui/*/*.test.mjs && cd extensions/providers/pi-provider-antigravity && node scripts/run-ts.mjs scripts/test-accounts.ts && node scripts/run-ts.mjs scripts/test-hot-failover-and-ui.ts && node scripts/run-ts.mjs scripts/test-oauth-fetch.ts && node scripts/run-ts.mjs scripts/test-http-proxy.ts && node scripts/run-ts.mjs scripts/test-model-routing.ts && node scripts/run-ts.mjs scripts/test-model-discovery.ts && node scripts/run-ts.mjs scripts/test-model-pricing.ts && node scripts/run-ts.mjs scripts/test-usage-formatter.ts && node scripts/run-ts.mjs scripts/test-stream-sse.ts && node scripts/run-ts.mjs scripts/test-stream-header-deadline.ts && node scripts/run-ts.mjs scripts/test-stream-recovery.ts && node scripts/run-ts.mjs scripts/test-capacity-retry.ts && node scripts/run-ts.mjs scripts/test-inline-system.ts && node scripts/run-ts.mjs scripts/test-sanitize-text.ts && node scripts/run-ts.mjs scripts/test-transcript-context.ts && node scripts/run-ts.mjs scripts/test-provider-registration.ts"
+    "test": "node --test tests/*.test.mjs extensions/ui/*/*.test.mjs extensions/providers/*/*.test.mjs"
   },
   "pi": {
     "extensions": [
@@ -22,14 +22,13 @@
       "./extensions/ui/pi-ui-image-paste",
       "./extensions/tools/pi-tool-subagents",
       "./extensions/tools/pi-tool-bash-timeout",
-      "./extensions/providers/pi-provider-antigravity/src/index.ts"
+      "./extensions/providers/pi-provider-stravia/index.ts"
     ],
     "skills": [
       "./extensions/tools/pi-tool-subagents/skills/subagents"
     ]
   },
   "dependencies": {
-    "effect": "^4.0.0-beta.103",
-    "undici": "^8.12.4"
+    "effect": "^4.0.0-beta.103"
   }
 }

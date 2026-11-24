@@ -1,6 +1,6 @@
 # rhine-pi-extensions
 
-一套面向 [Pi Coding Agent](https://github.com/earendil-works/pi-coding-agent) 的增强扩展套件，涵盖 **半透明圆角 TUI 美化**、**独立子代理与超时工具** 以及 **Antigravity 多账号容灾通道**。
+一套面向 [Pi Coding Agent](https://github.com/earendil-works/pi-coding-agent) 的增强扩展套件，涵盖 **半透明圆角 TUI 美化**、**独立子代理与超时工具** 以及 **Stravia 本地网关模型通道**。
 
 所有扩展均可通过内置的 `/extension-manager` **按需单项开关**，不必全盘照单全收。
 
@@ -58,7 +58,7 @@ pi update --extensions
 
 | 扩展 | 命令 | 功能说明 |
 | :--- | :--- | :--- |
-| **`pi-provider-antigravity`** | `/agy` | 精简版 Antigravity OAuth Provider：支持本地 HTTP 代理登录与刷新、`-tiered` 模型去重、多账号 5h/7d 冷却感知与热切换，以及圆角控制台 `/agy` |
+| **`pi-provider-stravia`** | 自动生效 / `/login stravia` | 通过本地 Stravia 网关（默认 `127.0.0.1:23471`）接入上游模型，自动清洗 Pi 系统提示词指纹减少 429 误拦截（密钥读取自 `STRAVIA_API_KEY`、本地 `models.json` 或 `/login stravia`） |
 
 ---
 
@@ -73,4 +73,3 @@ pi update --extensions
 ## Credits & License
 
 - 基于 **MIT** 协议开源。
-- 部分扩展在 [`Rahularya01/pi-antigravity`](https://github.com/Rahularya01/pi-antigravity) 等开源项目（MIT）基础上做了精简与重构，特此致谢。
